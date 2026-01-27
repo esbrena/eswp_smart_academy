@@ -85,12 +85,18 @@ function cl_parse_time_to_seconds($time_value) {
 
     $time_value = trim((string)$time_value);
 
-    // ACF suele devolver HH:MM:SS (pero a veces HH:MM)
+    // ACF suele devolver HH:MM:SS (pero a veces HH:MM).
+    // En algunos setups (duraciones) se ven valores tipo "MM:SS:00".
     $parts = explode(':', $time_value);
     $parts = array_map('intval', $parts);
 
     if (count($parts) === 3) {
         [$h, $m, $s] = $parts;
+        // Heurística: si viene como "MM:00:00", interpretarlo como minutos (duración),
+        // ya que muchos campos de duración acaban devolviendo 3 partes.
+        if ($m === 0 && $s === 0) {
+            return max(0, $h * 60);
+        }
         return max(0, ($h * 3600) + ($m * 60) + $s);
     }
 
@@ -1765,7 +1771,7 @@ add_shortcode('cl_form_inscripcion', function() {
             $notice = '<div class="cl-no-access">Selecciona al menos un curso disponible.</div>';
         } else {
             $token = cl_create_enrollment_request_token($user_id, $selected_ok);
-            $approve_link = admin_url('admin-post.php?action=cl_approve_enrollment_request&token=' . urlencode($token));
+            $review_link = admin_url('admin-post.php?action=cl_review_enrollment_request&token=' . urlencode($token));
 
             $user = get_user_by('id', $user_id);
             $subject = 'Solicitud de inscripción a cursos';
@@ -1777,8 +1783,8 @@ add_shortcode('cl_form_inscripcion', function() {
                 $c = get_post($cid);
                 $msg .= "- " . ($c ? $c->post_title : ('Curso ' . $cid)) . " (ID: {$cid})\n";
             }
-            $msg .= "\nPara inscribir al usuario en TODOS los cursos solicitados, haz clic aquí:\n";
-            $msg .= $approve_link . "\n";
+            $msg .= "\nRevisar solicitud (aprobar/revocar por curso):\n";
+            $msg .= $review_link . "\n";
 
             $admin_email = (string) get_option('admin_email');
             if ($admin_email) wp_mail($admin_email, $subject, $msg);
@@ -1813,10 +1819,81 @@ add_shortcode('cl_form_inscripcion', function() {
     return ob_get_clean();
 });
 
-add_action('admin_post_cl_approve_enrollment_request', function() {
+function cl_render_enrollment_review_screen($token, $req) {
+    $user_id = (int) ($req['user_id'] ?? 0);
+    $course_ids = array_values(array_unique(array_filter(array_map('absint', (array)($req['course_ids'] ?? [])))));
+    $user = $user_id ? get_user_by('id', $user_id) : null;
+
+    $courses = [];
+    foreach ($course_ids as $cid) {
+        if (get_post_type($cid) !== 'curso-cie') continue;
+        $c = get_post($cid);
+        if ($c) $courses[] = $c;
+    }
+
+    echo '<div class="wrap">';
+    echo '<h1>Revisar solicitud de inscripción</h1>';
+    echo '<p><strong>Usuario:</strong> ' . esc_html($user ? ($user->display_name . ' (' . $user->user_login . ')') : ('Usuario ' . $user_id)) . '</p>';
+    echo '<p><strong>Email:</strong> ' . esc_html($user ? $user->user_email : '-') . '</p>';
+    echo '<hr />';
+
+    if (empty($courses)) {
+        echo '<p>No hay cursos válidos en esta solicitud.</p>';
+        echo '</div>';
+        return;
+    }
+
+    echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
+    echo '<input type="hidden" name="action" value="cl_process_enrollment_request" />';
+    echo '<input type="hidden" name="token" value="' . esc_attr($token) . '" />';
+    wp_nonce_field('cl_process_enrollment_request_' . $token);
+
+    echo '<table class="widefat striped"><thead><tr>';
+    echo '<th>Curso</th><th>Acción</th>';
+    echo '</tr></thead><tbody>';
+    foreach ($courses as $c) {
+        $cid = $c->ID;
+        echo '<tr>';
+        echo '<td>' . esc_html($c->post_title) . '</td>';
+        echo '<td>';
+        echo '<label style="margin-right:12px;"><input type="radio" name="decision[' . esc_attr($cid) . ']" value="approve" checked /> Aprobar</label>';
+        echo '<label><input type="radio" name="decision[' . esc_attr($cid) . ']" value="revoke" /> Revocar</label>';
+        echo '</td>';
+        echo '</tr>';
+    }
+    echo '</tbody></table>';
+    echo '<p style="margin-top:14px;"><button type="submit" class="button button-primary">Guardar</button></p>';
+    echo '</form>';
+    echo '</div>';
+}
+
+add_action('admin_post_cl_review_enrollment_request', function() {
     if (!current_user_can('manage_options')) wp_die('Sin permisos.');
     $token = isset($_GET['token']) ? sanitize_text_field(wp_unslash($_GET['token'])) : '';
     if ($token === '') wp_die('Token inválido.');
+
+    $req = get_transient('cl_enroll_req_' . $token);
+    if (!is_array($req) || empty($req['user_id']) || empty($req['course_ids'])) {
+        wp_die('Solicitud caducada o inválida.');
+    }
+
+    if (!function_exists('wp_admin_css')) {
+        require_once ABSPATH . 'wp-admin/includes/admin.php';
+    }
+
+    // Render WP Admin header/footer mínimos
+    @header('Content-Type: text/html; charset=' . get_option('blog_charset'));
+    require_once ABSPATH . 'wp-admin/admin-header.php';
+    cl_render_enrollment_review_screen($token, $req);
+    require_once ABSPATH . 'wp-admin/admin-footer.php';
+    exit;
+});
+
+add_action('admin_post_cl_process_enrollment_request', function() {
+    if (!current_user_can('manage_options')) wp_die('Sin permisos.');
+    $token = isset($_POST['token']) ? sanitize_text_field(wp_unslash($_POST['token'])) : '';
+    if ($token === '') wp_die('Token inválido.');
+    check_admin_referer('cl_process_enrollment_request_' . $token);
 
     $req = get_transient('cl_enroll_req_' . $token);
     if (!is_array($req) || empty($req['user_id']) || empty($req['course_ids'])) {
@@ -1826,25 +1903,55 @@ add_action('admin_post_cl_approve_enrollment_request', function() {
 
     $user_id = (int) $req['user_id'];
     $course_ids = array_values(array_unique(array_filter(array_map('absint', (array)$req['course_ids']))));
+    $decisions = isset($_POST['decision']) ? (array) $_POST['decision'] : [];
 
-    $enrolled_titles = [];
+    $approved = [];
+    $revoked = [];
+
     foreach ($course_ids as $cid) {
         if (get_post_type($cid) !== 'curso-cie') continue;
         if (cl_course_access_mode($cid) !== 'inscripcion') continue;
+
+        $decision = isset($decisions[$cid]) ? sanitize_text_field($decisions[$cid]) : 'approve';
+        if ($decision !== 'approve') {
+            $revoked[] = $cid;
+            continue;
+        }
+
         $ids = cl_get_enrolled_user_ids($cid);
         if (!in_array($user_id, $ids, true)) {
             $ids[] = $user_id;
             update_post_meta($cid, CL_META_ENROLLED_USERS, array_values(array_unique($ids)));
         }
-        $c = get_post($cid);
-        if ($c) $enrolled_titles[] = $c->post_title;
+        $approved[] = $cid;
     }
 
+    // Email al usuario con cursos aprobados/revocados + links
     $user = get_user_by('id', $user_id);
-    if ($user && !empty($user->user_email) && !empty($enrolled_titles)) {
-        $subject = 'Inscripción confirmada';
-        $msg = "Has sido inscrito en los siguientes cursos:\n\n";
-        foreach ($enrolled_titles as $t) $msg .= "- {$t}\n";
+    if ($user && !empty($user->user_email)) {
+        $subject = 'Resultado de tu solicitud de inscripción';
+        $msg = "Hemos revisado tu solicitud de inscripción.\n\n";
+
+        if (!empty($approved)) {
+            $msg .= "Cursos aprobados:\n";
+            foreach ($approved as $cid) {
+                $c = get_post($cid);
+                $msg .= "- " . ($c ? $c->post_title : ('Curso ' . $cid)) . "\n";
+                $msg .= "  " . get_permalink($cid) . "\n";
+            }
+            $msg .= "\n";
+        }
+
+        if (!empty($revoked)) {
+            $msg .= "Cursos no aprobados:\n";
+            foreach ($revoked as $cid) {
+                $c = get_post($cid);
+                $msg .= "- " . ($c ? $c->post_title : ('Curso ' . $cid)) . "\n";
+                $msg .= "  " . get_permalink($cid) . "\n";
+            }
+            $msg .= "\n";
+        }
+
         wp_mail($user->user_email, $subject, $msg);
     }
 

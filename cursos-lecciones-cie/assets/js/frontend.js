@@ -90,6 +90,29 @@
         if(!videoEl) return false;
 
         let enforcing = false;
+        let msgTimeoutId = null;
+        let $seekMsg = null;
+
+        function ensureSeekMsg(){
+            if($seekMsg && $seekMsg.length) return $seekMsg;
+            const $wrap = $('.cl-video');
+            if(!$wrap.length) return null;
+            $seekMsg = $wrap.find('.cl-video-seek-msg');
+            if($seekMsg.length) return $seekMsg;
+            $seekMsg = $('<div class="cl-video-seek-msg" style="display:none;"></div>');
+            $wrap.append($seekMsg);
+            return $seekMsg;
+        }
+
+        function showSeekBlockedMessage(){
+            const $m = ensureSeekMsg();
+            if(!$m) return;
+            $m.text('No puedes adelantar el vídeo hasta ver esa parte.').stop(true, true).fadeIn(150);
+            if(msgTimeoutId) clearTimeout(msgTimeoutId);
+            msgTimeoutId = setTimeout(function(){
+                $m.fadeOut(200);
+            }, 5000);
+        }
 
         // Reanudar desde el último tiempo guardado (si aplica)
         videoEl.addEventListener('loadedmetadata', function(){
@@ -110,6 +133,7 @@
             const t = videoEl.currentTime || 0;
             if(t > maxVisto + 0.75){
                 enforceSeek();
+                showSeekBlockedMessage();
             }
         });
 
