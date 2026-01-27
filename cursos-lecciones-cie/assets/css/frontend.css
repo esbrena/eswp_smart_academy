@@ -88,3 +88,7 @@
     background:#0073aa;
     transition: width 0.5s linear;
 }
+
+#cl-progress-data {
+    display: none;
+}
