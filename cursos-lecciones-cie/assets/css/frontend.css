@@ -88,3 +88,82 @@
     background:#0073aa;
     transition: width 0.5s linear;
 }
+
+/* =========================
+   EXAMEN
+========================= */
+.cl-exam-wrap {
+    margin: 25px 0;
+    padding: 18px;
+    border: 1px solid #e2e2e2;
+    border-radius: 8px;
+    background: #fafafa;
+}
+
+.cl-exam-note {
+    margin-top: 10px;
+    padding: 10px 12px;
+    border-left: 4px solid #cc1818;
+    background: #fff5f5;
+}
+
+.cl-exam-state {
+    padding: 12px 14px;
+    border-radius: 6px;
+    background: #fff;
+    border: 1px solid #e6e6e6;
+}
+.cl-exam-pending { border-left: 4px solid #ffb900; }
+.cl-exam-approved { border-left: 4px solid #46b450; }
+.cl-exam-locked { border-left: 4px solid #cc1818; }
+
+.cl-exam-form {
+    margin-top: 14px;
+}
+
+.cl-exam-q {
+    margin: 0 0 18px;
+    padding: 12px;
+    border: 1px solid #e6e6e6;
+    background: #fff;
+    border-radius: 6px;
+}
+
+.cl-exam-q legend {
+    padding: 0 6px;
+    font-weight: 600;
+}
+
+.cl-exam-qimg img {
+    max-width: 100%;
+    height: auto;
+    border-radius: 6px;
+    margin: 10px 0;
+}
+
+.cl-exam-opt {
+    display: block;
+    margin: 8px 0;
+}
+
+.cl-exam-msg {
+    margin-top: 10px;
+    color: #cc1818;
+}
+
+.cl-exam-results {
+    margin-top: 14px;
+}
+.cl-exam-res-opts {
+    margin: 8px 0 0;
+}
+.cl-exam-res-opt.is-correct {
+    color: #1e7e34;
+}
+.cl-exam-res-opt.is-selected {
+    font-weight: 600;
+}
+
+#cl-progress-data {
+    display: none;
+}
