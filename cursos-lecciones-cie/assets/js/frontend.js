@@ -203,14 +203,95 @@
     // =============================
     // EXAMEN
     // =============================
+    let examTimerId = null;
+    function stopExamTimer(){
+        if(examTimerId){
+            clearInterval(examTimerId);
+            examTimerId = null;
+        }
+    }
+
+    function startCountdown($timer){
+        stopExamTimer();
+        const $cd = $timer.find('.cl-exam-countdown');
+        let remaining = parseInt($timer.data('time'), 10) || 0;
+        if(remaining <= 0 || !$cd.length) return;
+
+        function fmt(sec){
+            sec = Math.max(0, parseInt(sec, 10) || 0);
+            const m = Math.floor(sec / 60);
+            const s = sec % 60;
+            const mm = String(m).padStart(2,'0');
+            const ss = String(s).padStart(2,'0');
+            return mm + ':' + ss;
+        }
+
+        $cd.text(fmt(remaining));
+        examTimerId = setInterval(function(){
+            remaining -= 1;
+            $cd.text(fmt(remaining));
+            if(remaining <= 0){
+                stopExamTimer();
+                // Bloquear inputs y auto-enviar
+                const $form = $('#cl-exam-form');
+                $form.find('input, textarea, select, button').prop('disabled', true);
+                // Re-habilitar submit para poder enviar
+                $form.find('.cl-exam-submit').prop('disabled', false);
+                $form.trigger('submit');
+            }
+        }, 1000);
+    }
+
     $(document).on('click', '#cl-exam-start', function(){
-        $('.cl-exam-intro').hide();
-        $('#cl-exam-form').show();
-        $('html, body').animate({ scrollTop: $('#cl-exam-form').offset().top - 20 }, 300);
+        const $btn = $(this);
+        $btn.prop('disabled', true);
+
+        $.post(cl_ajax.ajax_url, {
+            action: 'cl_start_exam',
+            nonce: cl_ajax.nonce,
+            curso_id: cursoId,
+            leccion_id: leccionId
+        }).done(function(res){
+            if(res && res.success && res.data && res.data.token){
+                const $form = $('#cl-exam-form');
+                $form.find('input[name="exam_session_token"]').val(res.data.token);
+
+                $('.cl-exam-intro').hide();
+                $form.show();
+
+                const $timer = $form.find('.cl-exam-timer');
+                if($timer.length){
+                    startCountdown($timer);
+                }
+
+                $('html, body').animate({ scrollTop: $form.offset().top - 20 }, 300);
+            } else {
+                $btn.prop('disabled', false);
+                alert((res && res.data && res.data.message) ? res.data.message : 'No se pudo iniciar el examen.');
+            }
+        }).fail(function(xhr){
+            $btn.prop('disabled', false);
+            let msg = 'No se pudo iniciar el examen.';
+            if(xhr && xhr.responseJSON && xhr.responseJSON.data && xhr.responseJSON.data.message){
+                msg = xhr.responseJSON.data.message;
+            }
+            alert(msg);
+        });
+    });
+
+    $(document).on('click', '.cl-exam-finish', function(){
+        const $form = $('#cl-exam-form');
+        const token = String($form.find('input[name="exam_session_token"]').val() || '');
+        if(!token){
+            alert('Debes iniciar el examen antes de finalizarlo.');
+            return;
+        }
+        $form.trigger('submit');
     });
 
     $(document).on('submit', '#cl-exam-form', function(e){
         e.preventDefault();
+        stopExamTimer();
 
         const $form = $(this);
         const $btn = $form.find('.cl-exam-submit');

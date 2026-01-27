@@ -100,6 +100,26 @@
     background: #fafafa;
 }
 
+.cl-no-access {
+    margin: 15px 0;
+    padding: 12px 14px;
+    border-left: 4px solid #cc1818;
+    background: #fff5f5;
+    border-radius: 6px;
+}
+
+.cl-exam-timer {
+    margin: 10px 0 14px;
+    padding: 12px;
+    border: 1px dashed #d0d0d0;
+    background: #fff;
+    border-radius: 6px;
+}
+
+.cl-exam-time-note {
+    margin: 10px 0 0;
+}
+
 .cl-exam-note {
     margin-top: 10px;
     padding: 10px 12px;

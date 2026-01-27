@@ -3,6 +3,43 @@ jQuery(function($){
     const $list = $('#cl-exam-questions');
     const $addQ = $('#cl-exam-add-question');
 
+    // Mostrar/ocultar el bloque de examen según tipo de lección (ACF o metabox propio)
+    function getLessonType(){
+        // Preferir ACF: wrapper con data-name="tipo_leccion"
+        const $acf = $('.acf-field[data-name="tipo_leccion"]');
+        if($acf.length){
+            let val = '';
+            const $sel = $acf.find('select');
+            if($sel.length){
+                val = $sel.val();
+            } else {
+                const $checked = $acf.find('input:checked');
+                if($checked.length) val = $checked.val();
+                else val = $acf.find('input').first().val();
+            }
+            val = String(val || '').toLowerCase().trim();
+            return (val === 'examen' || val === 'exam') ? 'examen' : 'normal';
+        }
+        // Fallback: metabox propio
+        const v = String($('input[name="cl_leccion_tipo"]:checked').val() || 'normal').toLowerCase();
+        return (v === 'examen') ? 'examen' : 'normal';
+    }
+
+    function applyVisibility(){
+        const tipo = getLessonType();
+        const $mb = $('#cl_leccion_examen');
+        if(!$mb.length) return;
+        if(tipo === 'examen'){
+            $mb.show();
+        } else {
+            $mb.hide();
+        }
+    }
+
+    $(document).on('change', '.acf-field[data-name="tipo_leccion"] select, .acf-field[data-name="tipo_leccion"] input', applyVisibility);
+    $(document).on('change', 'input[name="cl_leccion_tipo"]', applyVisibility);
+    applyVisibility();
+
     if(!$input.length || !$list.length) return;
 
     function safeParse(json){
