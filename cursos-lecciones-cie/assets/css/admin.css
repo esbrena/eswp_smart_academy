@@ -1,0 +1,36 @@
+#cl-lecciones-list {
+    list-style: none;
+    padding-left: 0;
+}
+
+#cl-lecciones-list li {
+    background: #f9f9f9;
+    margin-bottom: 5px;
+    padding: 8px 10px;
+    border: 1px solid #ddd;
+    cursor: move;
+}
+
+#cl-lecciones-list li:hover {
+    background: #f1f1f1;
+}
+
+table.widefat td { text-align:center; }
+button.button-secondary { background:#f44336; color:white; border:none; }
+button.button-secondary:hover { background:#d32f2f; }
+
+.state-no-init {
+    padding:8px 16px;
+    border-radius:16px;
+    background-color:lightgray;
+}
+.state-progress {
+    padding:8px 16px;
+    border-radius:16px;
+    background-color:lightblue;
+}
+.state-complete {
+    padding:8px 16px;
+    border-radius:16px;
+    background-color:lightgreen;
+}
