@@ -21,6 +21,80 @@ function cl_get_field_compat($key, $post_id) {
 }
 
 /* =====================================================
+   DB: HISTÓRICO DE VISUALIZACIÓN (POR SEGUNDO)
+===================================================== */
+function cl_get_hist_table_name() {
+    global $wpdb;
+    return $wpdb->prefix . 'cl_vistas_lecciones';
+}
+
+function cl_create_hist_table() {
+    global $wpdb;
+    $table_name = cl_get_hist_table_name();
+    $charset_collate = $wpdb->get_charset_collate();
+
+    require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+
+    $sql = "CREATE TABLE {$table_name} (
+        id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+        user_id bigint(20) unsigned NOT NULL,
+        curso_id bigint(20) unsigned NOT NULL,
+        leccion_id bigint(20) unsigned NOT NULL,
+        segundo int(10) unsigned NOT NULL,
+        tipo varchar(20) NOT NULL DEFAULT 'pantalla',
+        created_at datetime NOT NULL,
+        PRIMARY KEY  (id),
+        UNIQUE KEY user_leccion_segundo_tipo (user_id, leccion_id, segundo, tipo),
+        KEY curso_leccion (curso_id, leccion_id),
+        KEY user_curso (user_id, curso_id)
+    ) {$charset_collate};";
+
+    dbDelta($sql);
+}
+
+register_activation_hook(__FILE__, function() {
+    cl_create_hist_table();
+    update_option('cl_db_version', 1);
+});
+
+add_action('plugins_loaded', function() {
+    $db_version = intval(get_option('cl_db_version', 0));
+    if($db_version < 1){
+        cl_create_hist_table();
+        update_option('cl_db_version', 1);
+    }
+});
+
+/* =====================================================
+   UTILS
+===================================================== */
+function cl_parse_time_to_seconds($time_value) {
+    if ($time_value === null || $time_value === false || $time_value === '') return 0;
+
+    // Si ya viene numérico (minutos/segundos), respetar
+    if (is_numeric($time_value)) return max(0, intval($time_value));
+
+    $time_value = trim((string)$time_value);
+
+    // ACF suele devolver HH:MM:SS (pero a veces HH:MM)
+    $parts = explode(':', $time_value);
+    $parts = array_map('intval', $parts);
+
+    if (count($parts) === 3) {
+        [$h, $m, $s] = $parts;
+        return max(0, ($h * 3600) + ($m * 60) + $s);
+    }
+
+    if (count($parts) === 2) {
+        [$m, $s] = $parts;
+        return max(0, ($m * 60) + $s);
+    }
+
+    // Formato desconocido
+    return 0;
+}
+
+/* =====================================================
    CPT: CURSOS
 ===================================================== */
 add_action( 'init', function() {
@@ -352,21 +426,13 @@ add_shortcode('cl_leccion_curso', function(){
 
     $contenido = apply_filters('the_content', $leccion_actual->post_content);
     $video = cl_get_field_compat('video-tracking', $leccion_actual->ID);
-    $tiempo_minimo = 0;
-    // 1. Obtener el valor del campo ACF (formato H:i:s)
-    $time = cl_get_field_compat('tiempo_minimo', $leccion_actual->ID); // Asumiendo que devuelve '00:01:00'
-        if( $time ) {
-            // 2. Dividir la cadena por los dos puntos
-            $time_parts = explode(':', $time);
-            $hours = intval($time_parts[0]);
-            $minutes = intval($time_parts[1]);
-            
-            // 3. Convertir todo a minutos
-            $total_minutes = ($hours * 60) + $minutes;
-            
-            // Resultado: 1
-            $tiempo_minimo = $total_minutes;
-        }
+    $time = cl_get_field_compat('tiempo_minimo', $leccion_actual->ID);
+    $tiempo_minimo_seg = cl_parse_time_to_seconds($time);
+
+    // Tiempo guardado previamente (para no resetear al volver a entrar)
+    $tiempos_guardados = get_user_meta($user_id, "cl_curso_{$curso_id}_tiempos", true);
+    if(!is_array($tiempos_guardados)) $tiempos_guardados = [];
+    $tiempo_guardado_actual = isset($tiempos_guardados[$leccion_actual->ID]) ? intval($tiempos_guardados[$leccion_actual->ID]) : 0;
 
 
     $ids = wp_list_pluck($lecciones,'ID');
@@ -379,6 +445,11 @@ add_shortcode('cl_leccion_curso', function(){
         $attempt = cl_get_latest_exam_attempt($user_id, $curso_id, $leccion_actual->ID);
         $exam_status = $attempt ? get_post_meta($attempt->ID, '_cl_status', true) : 'not_started';
         $exam_ui = cl_render_exam_frontend($curso_id, $leccion_actual->ID, $attempt);
+    }
+
+    $disable_next_by_exam = false;
+    if ($leccion_tipo === 'examen' && $exam_status !== 'approved') {
+        $disable_next_by_exam = true;
     }
 
     ob_start(); ?>
@@ -395,9 +466,18 @@ add_shortcode('cl_leccion_curso', function(){
                 $leccion_completada = in_array($leccion_actual->ID, $completadas);
                 // Obtener la siguiente lección (si existe)
                 $next_leccion = isset($lecciones[$index + 1]) ? $lecciones[$index + 1] : null;
+
+                $porcentaje_barra = 0;
+                if($leccion_completada){
+                    $porcentaje_barra = 100;
+                } elseif($tiempo_minimo_seg > 0 && $tiempo_guardado_actual > 0){
+                    $porcentaje_barra = min(100, ($tiempo_guardado_actual / $tiempo_minimo_seg) * 100);
+                }
+
+                $should_disable_next_by_time = (!$leccion_completada && $tiempo_minimo_seg > 0 && $tiempo_guardado_actual < $tiempo_minimo_seg);
             ?>
             <div class="cl-barra-tiempo">
-                <div class="cl-barra-llenado" style="width: <?php echo $leccion_completada ? '100%' : '0'; ?>%"></div>
+                <div class="cl-barra-llenado" style="width: <?php echo esc_attr($porcentaje_barra); ?>%"></div>
             </div>
 
 
@@ -412,6 +492,16 @@ add_shortcode('cl_leccion_curso', function(){
             <div class="cl-texto">
                 <?php echo $contenido; ?>
             </div>
+
+            <div id="cl-progress-data"
+                data-curso="<?php echo esc_attr($curso_id); ?>"
+                data-leccion="<?php echo esc_attr($leccion_actual->ID); ?>"
+                data-tiempo="<?php echo esc_attr($tiempo_minimo_seg); ?>"
+                data-last="<?php echo esc_attr($tiempo_guardado_actual); ?>"
+                data-is-video="<?php echo $video ? '1' : '0'; ?>"
+                data-state="<?php echo esc_attr($leccion_completada); ?>"
+                data-exam-lock="<?php echo $disable_next_by_exam ? '1' : '0'; ?>"
+            ></div>
 
             <?php if($leccion_tipo === 'examen'): ?>
                 <div class="cl-exam-wrap">
@@ -429,23 +519,18 @@ add_shortcode('cl_leccion_curso', function(){
                         </a>
                         <?php endif; ?>
 
-
-                        <?php
-                            $disable_next_by_exam = false;
-                            if ($leccion_tipo === 'examen' && $exam_status !== 'approved') {
-                                $disable_next_by_exam = true;
-                            }
-                        ?>
-
                         <?php if($next_leccion): ?>
                         <button id="cl-btn-siguiente"
                         class="cl-btn"
                         data-next="<?php echo esc_url( get_permalink($curso_id) . '?leccion=' . $next_leccion->ID ); ?>"
                         data-curso="<?php echo esc_attr($curso_id); ?>"
                         data-leccion="<?php echo esc_attr($leccion_actual->ID); ?>"
-                        data-tiempo="<?php echo esc_attr($tiempo_minimo); ?>"
+                        data-tiempo="<?php echo esc_attr($tiempo_minimo_seg); ?>"
+                        data-last="<?php echo esc_attr($tiempo_guardado_actual); ?>"
+                        data-is-video="<?php echo $video ? '1' : '0'; ?>"
                         data-state="<?php echo esc_attr($leccion_completada); ?>"
-                        <?php echo ($leccion_completada && !$disable_next_by_exam) ? '' : 'disabled'; ?>>
+                        data-exam-lock="<?php echo $disable_next_by_exam ? '1' : '0'; ?>"
+                        <?php echo ($should_disable_next_by_time || $disable_next_by_exam) ? 'disabled' : ''; ?>>
                         Siguiente lección →
                         </button>
                         <?php endif; ?>
@@ -746,6 +831,92 @@ function cl_notify_admin_exam_submitted($attempt_id) {
 }
 
 /* =====================================================
+   CORE: ACTUALIZAR PROGRESO + HISTÓRICO
+===================================================== */
+function cl_update_progress_and_history($user_id, $curso_id, $leccion_id, $tiempo, $tiempo_minimo = 0, $tipo = 'pantalla', $force_complete = false) {
+    global $wpdb;
+
+    $user_id = intval($user_id);
+    $curso_id = intval($curso_id);
+    $leccion_id = intval($leccion_id);
+    $tiempo = max(0, intval($tiempo));
+    $tiempo_minimo = max(0, intval($tiempo_minimo));
+    $tipo = sanitize_key($tipo ?: 'pantalla');
+
+    $tiempos = get_user_meta($user_id,"cl_curso_{$curso_id}_tiempos",true);
+    if(!is_array($tiempos)) $tiempos = [];
+
+    $prev = isset($tiempos[$leccion_id]) ? intval($tiempos[$leccion_id]) : 0;
+    $updated = false;
+
+    // Solo actualiza si el nuevo tiempo es mayor que el último guardado
+    if($tiempo > $prev){
+        $tiempos[$leccion_id] = $tiempo;
+        update_user_meta($user_id,"cl_curso_{$curso_id}_tiempos",$tiempos);
+        $updated = true;
+
+        // Histórico por segundo (INSERT IGNORE)
+        $table = cl_get_hist_table_name();
+        $start = $prev + 1;
+        $end = $tiempo;
+
+        // Evitar loops enormes si el cliente estuvo offline o se saltó ticks
+        if(($end - $start) > 600){
+            $start = max($start, $end - 600);
+        }
+
+        for($s = $start; $s <= $end; $s++){
+            $wpdb->query($wpdb->prepare(
+                "INSERT IGNORE INTO {$table} (user_id, curso_id, leccion_id, segundo, tipo, created_at)
+                 VALUES (%d, %d, %d, %d, %s, UTC_TIMESTAMP())",
+                $user_id, $curso_id, $leccion_id, $s, $tipo
+            ));
+        }
+    }
+
+    // Marcar completada si cumple tiempo mínimo (o si se fuerza al pulsar "Siguiente")
+    $completed_now = false;
+    $completadas = get_user_meta($user_id,"cl_curso_{$curso_id}_completadas",true);
+    if(!is_array($completadas)) $completadas = [];
+
+    $should_complete = ($force_complete === true) || ($tiempo_minimo > 0 && $tiempo >= $tiempo_minimo);
+    if($should_complete && !in_array($leccion_id,$completadas)){
+        $completadas[] = $leccion_id;
+        update_user_meta($user_id,"cl_curso_{$curso_id}_completadas",$completadas);
+        $completed_now = true;
+    }
+
+    return [
+        'updated' => $updated,
+        'prev' => $prev,
+        'stored' => isset($tiempos[$leccion_id]) ? intval($tiempos[$leccion_id]) : $prev,
+        'completed_now' => $completed_now,
+    ];
+}
+
+/* =====================================================
+   AJAX: GUARDAR PROGRESO (TICK POR SEGUNDO)
+===================================================== */
+add_action('wp_ajax_cl_guardar_progreso_tick', function(){
+
+    check_ajax_referer('cl_ajax_nonce','nonce');
+
+    $user_id    = get_current_user_id();
+    $curso_id   = intval($_POST['curso_id'] ?? 0);
+    $leccion_id = intval($_POST['leccion_id'] ?? 0);
+    $tiempo     = intval($_POST['tiempo'] ?? 0);
+    $tiempo_minimo = intval($_POST['tiempo_minimo'] ?? 0);
+    $tipo = sanitize_key($_POST['tipo'] ?? 'pantalla');
+
+    if(!$user_id || !$curso_id || !$leccion_id){
+        wp_send_json_error(['message' => 'Datos incompletos']);
+    }
+
+    $res = cl_update_progress_and_history($user_id, $curso_id, $leccion_id, $tiempo, $tiempo_minimo, $tipo);
+    wp_send_json_success($res);
+});
+
+/* =====================================================
    AJAX: GUARDAR PROGRESO
 ===================================================== */
 add_action('wp_ajax_cl_guardar_progreso', function(){
@@ -753,31 +924,18 @@ add_action('wp_ajax_cl_guardar_progreso', function(){
     check_ajax_referer('cl_ajax_nonce','nonce');
 
     $user_id    = get_current_user_id();
-    $curso_id   = intval($_POST['curso_id']);
-    $leccion_id = intval($_POST['leccion_id']);
-    $tiempo     = intval($_POST['tiempo']);
+    $curso_id   = intval($_POST['curso_id'] ?? 0);
+    $leccion_id = intval($_POST['leccion_id'] ?? 0);
+    $tiempo     = intval($_POST['tiempo'] ?? 0);
+    $tiempo_minimo = intval($_POST['tiempo_minimo'] ?? 0);
+    $tipo = sanitize_key($_POST['tipo'] ?? 'pantalla');
 
     if(!$user_id || !$curso_id || !$leccion_id){
-        wp_send_json_error();
+        wp_send_json_error(['message' => 'Datos incompletos']);
     }
 
-    $completadas = get_user_meta($user_id,"cl_curso_{$curso_id}_completadas",true);
-    if(!is_array($completadas)) $completadas = [];
-
-    if(!in_array($leccion_id,$completadas)){
-        $completadas[] = $leccion_id;
-        update_user_meta($user_id,"cl_curso_{$curso_id}_completadas",$completadas);
-    }
-
-    $tiempos = get_user_meta($user_id,"cl_curso_{$curso_id}_tiempos",true);
-    if(!is_array($tiempos)) $tiempos = [];
-
-    if(!isset($tiempos[$leccion_id])){
-        $tiempos[$leccion_id] = $tiempo;
-        update_user_meta($user_id,"cl_curso_{$curso_id}_tiempos",$tiempos);
-    }
-
-    wp_send_json_success();
+    $res = cl_update_progress_and_history($user_id, $curso_id, $leccion_id, $tiempo, $tiempo_minimo, $tipo, true);
+    wp_send_json_success($res);
 });
 
 /* =====================================================
@@ -857,6 +1015,11 @@ function cl_render_progreso_usuarios(){
         delete_user_meta($uid,"cl_curso_{$cid}_actual");
         delete_user_meta($uid,"cl_curso_{$cid}_tiempos");
         delete_user_meta($uid,"cl_curso_{$cid}_aprobado");
+
+        // Borrar histórico
+        global $wpdb;
+        $table = cl_get_hist_table_name();
+        $wpdb->query($wpdb->prepare("DELETE FROM {$table} WHERE user_id = %d AND curso_id = %d", $uid, $cid));
         echo '<div class="notice notice-success"><p>Progreso borrado correctamente.</p></div>';
         echo '<meta http-equiv="refresh" content="1">';
     }

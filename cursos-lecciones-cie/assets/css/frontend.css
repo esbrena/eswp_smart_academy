@@ -163,3 +163,7 @@
 .cl-exam-res-opt.is-selected {
     font-weight: 600;
 }
+
+#cl-progress-data {
+    display: none;
+}
