@@ -856,6 +856,7 @@ function cl_render_progreso_usuarios(){
         delete_user_meta($uid,"cl_curso_{$cid}_completadas");
         delete_user_meta($uid,"cl_curso_{$cid}_actual");
         delete_user_meta($uid,"cl_curso_{$cid}_tiempos");
+        delete_user_meta($uid,"cl_curso_{$cid}_aprobado");
         echo '<div class="notice notice-success"><p>Progreso borrado correctamente.</p></div>';
         echo '<meta http-equiv="refresh" content="1">';
     }
