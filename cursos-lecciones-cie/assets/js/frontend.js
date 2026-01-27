@@ -73,4 +73,44 @@
         window.location.href = leccionAnterior;
     });
 
+    // =============================
+    // EXAMEN
+    // =============================
+    $(document).on('click', '#cl-exam-start', function(){
+        $('.cl-exam-intro').hide();
+        $('#cl-exam-form').show();
+        $('html, body').animate({ scrollTop: $('#cl-exam-form').offset().top - 20 }, 300);
+    });
+
+    $(document).on('submit', '#cl-exam-form', function(e){
+        e.preventDefault();
+
+        const $form = $(this);
+        const $btn = $form.find('.cl-exam-submit');
+        const $msg = $form.find('.cl-exam-msg');
+
+        $msg.text('');
+        $btn.prop('disabled', true);
+
+        const payload = $form.serialize() + '&action=cl_submit_exam&nonce=' + encodeURIComponent(cl_ajax.nonce);
+
+        $.post(cl_ajax.ajax_url, payload)
+            .done(function(res){
+                if(res && res.success){
+                    window.location.reload();
+                } else {
+                    $btn.prop('disabled', false);
+                    $msg.text((res && res.data && res.data.message) ? res.data.message : 'Error al enviar el examen.');
+                }
+            })
+            .fail(function(xhr){
+                $btn.prop('disabled', false);
+                let msg = 'Error al enviar el examen.';
+                if(xhr && xhr.responseJSON && xhr.responseJSON.data && xhr.responseJSON.data.message){
+                    msg = xhr.responseJSON.data.message;
+                }
+                $msg.text(msg);
+            });
+    });
+
 })(jQuery);
