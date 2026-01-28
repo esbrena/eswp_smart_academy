@@ -1,5 +1,40 @@
 (function($){
 
+    // =============================
+    // COMENZAR CURSO
+    // =============================
+    $(document).on('click', '#cl-btn-start-course', function(){
+        if(!window.cl_ajax || !cl_ajax.ajax_url) return;
+        const $btn = $(this);
+        const cursoId = parseInt($btn.data('curso'), 10) || 0;
+        const $msg = $('.cl-start-msg');
+        if(!cursoId) return;
+
+        $btn.prop('disabled', true);
+        if($msg.length) $msg.text('Iniciando curso...');
+
+        $.post(cl_ajax.ajax_url, {
+            action: 'cl_comenzar_curso',
+            nonce: cl_ajax.nonce,
+            curso_id: cursoId
+        }).done(function(res){
+            if(res && res.success){
+                window.location.reload();
+            } else {
+                $btn.prop('disabled', false);
+                const msg = (res && res.data && res.data.message) ? res.data.message : 'No se pudo iniciar el curso.';
+                if($msg.length) $msg.text(msg);
+            }
+        }).fail(function(xhr){
+            $btn.prop('disabled', false);
+            let msg = 'No se pudo iniciar el curso.';
+            if(xhr && xhr.responseJSON && xhr.responseJSON.data && xhr.responseJSON.data.message){
+                msg = xhr.responseJSON.data.message;
+            }
+            if($msg.length) $msg.text(msg);
+        });
+    });
+
     const progressEl = $('#cl-progress-data');
     if(!progressEl.length) return;
 
@@ -13,6 +48,9 @@
     const isVideoLesson = String(progressEl.data('isVideo')) === '1';
     const wasCompleted = String(progressEl.data('state')) === '1';
     const examLocked = String(progressEl.data('examLock')) === '1';
+    const lessonType = String(progressEl.data('lessonType') || 'normal').toLowerCase().trim();
+    const isExamLesson = lessonType === 'examen';
+    const shouldTrackTime = (tiempoMinSegundos > 0) && !isExamLesson;
 
     let progreso = lastSavedInicial;   // segundos acumulados (no resetea al volver a entrar)
     let maxVisto = lastSavedInicial;   // para limitar el adelanto en vídeo
@@ -39,6 +77,7 @@
     }
 
     function sendTick(tiempo, tipo){
+        if(!shouldTrackTime) return;
         tiempo = parseInt(tiempo, 10) || 0;
         if(tiempo <= lastSent) return; // solo si es mayor al último guardado/enviado
 
@@ -78,6 +117,7 @@
 
     function startScreenTimer(){
         // Para lecciones sin vídeo: cuenta tiempo en pantalla sin resetear
+        if(!shouldTrackTime) return;
         updateUI();
         setInterval(function(){
             progreso += 1;
@@ -148,6 +188,7 @@
         // Guardar progreso al reproducir, y cada segundo mientras esté en play
         let intervalId = null;
         function ensureInterval(){
+            if(!shouldTrackTime) return;
             if(intervalId) return;
             intervalId = setInterval(function(){
                 if(videoEl.paused || videoEl.ended || videoEl.seeking) return;
@@ -167,6 +208,7 @@
 
         // Flush al salir
         window.addEventListener('beforeunload', function(){
+            if(!shouldTrackTime) return;
             const t = Math.floor(videoEl.currentTime || 0);
             if(t > progreso){
                 progreso = t;

@@ -4,6 +4,26 @@
     gap: 30px;
 }
 
+/* Intro del curso (extracto + comenzar) */
+.cl-course-intro,
+.cl-course-excerpt {
+    margin: 0 0 18px;
+}
+
+.cl-course-excerpt {
+    padding: 14px 16px;
+    border: 1px solid #e6e6e6;
+    border-radius: 8px;
+    background: #fff;
+}
+
+.cl-course-excerpt p {
+    margin: 0 0 10px;
+}
+.cl-course-excerpt p:last-child {
+    margin-bottom: 0;
+}
+
 /* Sidebar */
 .cl-sidebar {
     width: 250px;
@@ -76,6 +96,31 @@
 #cl-btn-siguiente:disabled {
     opacity: 0.6;
     cursor: not-allowed;
+}
+
+.cl-btn {
+    display: inline-block;
+    padding: 10px 18px;
+    border-radius: 8px;
+    border: 1px solid #007cba;
+    background: #007cba;
+    color: #fff;
+    font-size: 16px;
+    line-height: 1.1;
+    cursor: pointer;
+}
+
+.cl-btn:hover {
+    filter: brightness(0.95);
+}
+
+.cl-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.cl-start-msg {
+    font-size: 14px;
 }
 
 .cl-sidebar-lecciones li.primera { font-weight: bold; }
