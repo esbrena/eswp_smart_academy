@@ -737,7 +737,7 @@ function cl_render_leccion_examen_metabox($post) {
         </div>
 
         <p class="description" style="margin-top:10px;">
-            Tipos: <strong>Single choice</strong> (una correcta) y <strong>Multi choice</strong> (varias correctas). Puedes añadir imagen por pregunta.
+            Tipos: <strong>Single choice</strong> (una correcta), <strong>Multi choice</strong> (varias correctas) y <strong>Texto libre</strong> (respuesta abierta). Puedes añadir imagen por pregunta y asignar puntos por pregunta.
         </p>
         <?php if ($tipo !== 'examen'): ?>
             <p class="description" style="margin-top:10px;"><em>Esta lección no es de tipo “examen”. El builder queda oculto/ignorado.</em></p>
@@ -795,8 +795,23 @@ function cl_normalize_exam_definition($decoded) {
         if (!is_array($q)) continue;
 
         $text = isset($q['text']) ? wp_kses_post($q['text']) : '';
-        $type = isset($q['type']) && in_array($q['type'], ['single', 'multi'], true) ? $q['type'] : 'single';
+        $type = isset($q['type']) && in_array($q['type'], ['single', 'multi', 'text'], true) ? $q['type'] : 'single';
         $image_id = isset($q['image_id']) ? absint($q['image_id']) : 0;
+        $points = isset($q['points']) ? (float) $q['points'] : 1.0;
+        if (!is_finite($points) || $points < 0) $points = 1.0;
+
+        if ($text === '') continue;
+
+        if ($type === 'text') {
+            $out['questions'][] = [
+                'text' => $text,
+                'type' => 'text',
+                'points' => (float) $points,
+                'image_id' => $image_id,
+                'options' => [],
+            ];
+            continue;
+        }
 
         $options = [];
         if (isset($q['options']) && is_array($q['options'])) {
@@ -812,7 +827,7 @@ function cl_normalize_exam_definition($decoded) {
             }
         }
 
-        if ($text === '' || count($options) < 2) continue;
+        if (count($options) < 2) continue;
 
         // En single, mantener solo una correcta (la primera marcada).
         if ($type === 'single') {
@@ -829,6 +844,7 @@ function cl_normalize_exam_definition($decoded) {
         $out['questions'][] = [
             'text' => $text,
             'type' => $type,
+            'points' => (float) $points,
             'image_id' => $image_id,
             'options' => array_values($options),
         ];
@@ -1335,21 +1351,32 @@ function cl_render_exam_frontend($curso_id, $leccion_id, $attempt) {
                 <?php endif; ?>
 
                 <?php
-                    $type = (isset($q['type']) && $q['type'] === 'multi') ? 'multi' : 'single';
-                    $input_type = $type === 'multi' ? 'checkbox' : 'radio';
+                    $qtype = (isset($q['type']) && in_array($q['type'], ['single', 'multi', 'text'], true)) ? $q['type'] : 'single';
                 ?>
-                <div class="cl-exam-opts" data-qtype="<?php echo esc_attr($type); ?>">
-                    <?php foreach ($q['options'] as $oi => $opt): ?>
-                        <label class="cl-exam-opt">
-                            <input
-                                type="<?php echo esc_attr($input_type); ?>"
-                                name="answers[<?php echo esc_attr($qi); ?>]<?php echo $type === 'multi' ? '[]' : ''; ?>"
-                                value="<?php echo esc_attr($oi); ?>"
-                            />
-                            <span><?php echo wp_kses_post($opt['text']); ?></span>
-                        </label>
-                    <?php endforeach; ?>
-                </div>
+
+                <?php if ($qtype === 'text'): ?>
+                    <div class="cl-exam-free">
+                        <label class="cl-exam-free-label" style="display:block; font-weight:600; margin:10px 0 6px;">Tu respuesta</label>
+                        <textarea name="answers[<?php echo esc_attr($qi); ?>]" rows="5" style="width:100%;"></textarea>
+                    </div>
+                <?php else: ?>
+                    <?php
+                        $type = $qtype === 'multi' ? 'multi' : 'single';
+                        $input_type = $type === 'multi' ? 'checkbox' : 'radio';
+                    ?>
+                    <div class="cl-exam-opts" data-qtype="<?php echo esc_attr($type); ?>">
+                        <?php foreach ($q['options'] as $oi => $opt): ?>
+                            <label class="cl-exam-opt">
+                                <input
+                                    type="<?php echo esc_attr($input_type); ?>"
+                                    name="answers[<?php echo esc_attr($qi); ?>]<?php echo $type === 'multi' ? '[]' : ''; ?>"
+                                    value="<?php echo esc_attr($oi); ?>"
+                                />
+                                <span><?php echo wp_kses_post($opt['text']); ?></span>
+                            </label>
+                        <?php endforeach; ?>
+                    </div>
+                <?php endif; ?>
             </fieldset>
             </div>
         <?php endforeach; ?>
@@ -1382,36 +1409,69 @@ function cl_render_exam_results_readonly($leccion_id, $attempt) {
     $answers = get_post_meta($attempt->ID, '_cl_answers', true);
     if (!is_array($answers)) $answers = [];
 
+    $final_breakdown = get_post_meta($attempt->ID, '_cl_final_breakdown', true);
+    if (!is_array($final_breakdown)) {
+        $final_breakdown = get_post_meta($attempt->ID, '_cl_auto_breakdown', true);
+    }
+    if (!is_array($final_breakdown)) $final_breakdown = [];
+    $final_points = get_post_meta($attempt->ID, '_cl_final_points', true);
+    if (!is_numeric($final_points)) $final_points = get_post_meta($attempt->ID, '_cl_auto_points', true);
+    $total_points = get_post_meta($attempt->ID, '_cl_total_points', true);
+
     ob_start();
     ?>
     <div class="cl-exam-results">
         <h3>Resultados</h3>
+        <?php if (is_numeric($final_points) && is_numeric($total_points) && (float)$total_points > 0): ?>
+            <p class="cl-exam-points-total"><strong>Puntos:</strong> <?php echo esc_html(round((float)$final_points, 2)); ?> / <?php echo esc_html(round((float)$total_points, 2)); ?></p>
+        <?php endif; ?>
         <?php foreach ($def['questions'] as $qi => $q): ?>
             <div class="cl-exam-res-q">
                 <div class="cl-exam-res-title"><?php echo esc_html($qi + 1); ?>. <?php echo wp_kses_post($q['text']); ?></div>
                 <?php
-                    $selected = isset($answers[$qi]) ? (array)$answers[$qi] : [];
-                    $correct = [];
-                    foreach ($q['options'] as $oi => $opt) {
-                        if (!empty($opt['is_correct'])) $correct[] = (string)$oi;
-                    }
+                    $qtype = (isset($q['type']) && in_array($q['type'], ['single', 'multi', 'text'], true)) ? $q['type'] : 'single';
+                    $max_points = isset($q['points']) ? (float)$q['points'] : 1.0;
+                    $earned = isset($final_breakdown[$qi]['earned']) ? (float)$final_breakdown[$qi]['earned'] : null;
                 ?>
-                <ul class="cl-exam-res-opts">
-                    <?php foreach ($q['options'] as $oi => $opt): ?>
-                        <?php
-                            $is_sel = in_array((string)$oi, array_map('strval', $selected), true);
-                            $is_cor = in_array((string)$oi, $correct, true);
-                            $cls = 'cl-exam-res-opt';
-                            if ($is_cor) $cls .= ' is-correct';
-                            if ($is_sel) $cls .= ' is-selected';
-                        ?>
-                        <li class="<?php echo esc_attr($cls); ?>">
-                            <?php echo wp_kses_post($opt['text']); ?>
-                            <?php if ($is_cor): ?> <strong>(correcta)</strong><?php endif; ?>
-                            <?php if ($is_sel && !$is_cor): ?> <em>(tu respuesta)</em><?php endif; ?>
-                        </li>
-                    <?php endforeach; ?>
-                </ul>
+                <?php if (is_numeric($earned)): ?>
+                    <div class="cl-exam-qpoints"><strong>Puntos:</strong> <?php echo esc_html(round($earned, 2)); ?> / <?php echo esc_html(round($max_points, 2)); ?></div>
+                <?php endif; ?>
+
+                <?php if ($qtype === 'text'): ?>
+                    <?php $txt = isset($answers[$qi]) ? (string)$answers[$qi] : ''; ?>
+                    <div class="cl-exam-text-answer">
+                        <div class="cl-exam-text-answer-label"><strong>Tu respuesta:</strong></div>
+                        <div class="cl-exam-text-answer-body"><?php echo nl2br(esc_html($txt)); ?></div>
+                    </div>
+                <?php else: ?>
+                    <?php
+                        $selected = isset($answers[$qi]) ? (array)$answers[$qi] : [];
+                        $selected = array_values(array_unique(array_map('strval', $selected)));
+                        $correct = [];
+                        if (isset($q['options']) && is_array($q['options'])) {
+                            foreach ($q['options'] as $oi => $opt) {
+                                if (!empty($opt['is_correct'])) $correct[] = (string)$oi;
+                            }
+                        }
+                        $correct = array_values(array_unique($correct));
+                    ?>
+                    <ul class="cl-exam-res-opts">
+                        <?php foreach ($q['options'] as $oi => $opt): ?>
+                            <?php
+                                $is_sel = in_array((string)$oi, $selected, true);
+                                $is_cor = in_array((string)$oi, $correct, true);
+                                $cls = 'cl-exam-res-opt';
+                                if ($is_cor) $cls .= ' is-correct';
+                                if ($is_sel) $cls .= ' is-selected';
+                                if ($is_sel && !$is_cor) $cls .= ' is-wrong';
+                                if (!$is_sel && $is_cor) $cls .= ' is-missed';
+                            ?>
+                            <li class="<?php echo esc_attr($cls); ?>">
+                                <?php echo wp_kses_post($opt['text']); ?>
+                            </li>
+                        <?php endforeach; ?>
+                    </ul>
+                <?php endif; ?>
             </div>
         <?php endforeach; ?>
     </div>
@@ -1516,7 +1576,8 @@ add_action('wp_ajax_cl_submit_exam', function() {
 
     $raw_answers = isset($_POST['answers']) ? $_POST['answers'] : [];
     $answers = cl_normalize_exam_answers($raw_answers, $def);
-    $auto_score = cl_calculate_exam_score($answers, $def); // 0-100
+    $auto = cl_calculate_exam_auto($answers, $def); // ['score'=>0-100, ...]
+    $auto_score = (float) ($auto['score'] ?? 0); // 0-100
 
     $attempt_id = wp_insert_post([
         'post_type' => 'cl-exam-attempt',
@@ -1533,6 +1594,9 @@ add_action('wp_ajax_cl_submit_exam', function() {
     update_post_meta($attempt_id, '_cl_user_id', $user_id);
     update_post_meta($attempt_id, '_cl_answers', $answers);
     update_post_meta($attempt_id, '_cl_auto_score', $auto_score);
+    update_post_meta($attempt_id, '_cl_auto_points', (float) ($auto['earned_points'] ?? 0));
+    update_post_meta($attempt_id, '_cl_total_points', (float) ($auto['total_points'] ?? 0));
+    update_post_meta($attempt_id, '_cl_auto_breakdown', $auto['breakdown'] ?? []);
     $autoeval = ((int) get_post_meta($curso_id, CL_META_COURSE_AUTOEVAL, true)) === 1;
     update_post_meta($attempt_id, '_cl_status', $autoeval ? 'approved' : 'pending_review');
     update_post_meta($attempt_id, '_cl_submitted_at', current_time('mysql'));
@@ -1541,6 +1605,8 @@ add_action('wp_ajax_cl_submit_exam', function() {
 
     if ($autoeval) {
         update_post_meta($attempt_id, '_cl_final_score', $auto_score);
+        update_post_meta($attempt_id, '_cl_final_points', (float) ($auto['earned_points'] ?? 0));
+        update_post_meta($attempt_id, '_cl_final_breakdown', $auto['breakdown'] ?? []);
         cl_mark_course_approved($user_id, $curso_id, $leccion_id);
     }
 
@@ -1552,7 +1618,15 @@ add_action('wp_ajax_cl_submit_exam', function() {
 function cl_normalize_exam_answers($raw, $def) {
     $answers = [];
     foreach ($def['questions'] as $qi => $q) {
-        $type = (isset($q['type']) && $q['type'] === 'multi') ? 'multi' : 'single';
+        $type = (isset($q['type']) && in_array($q['type'], ['single', 'multi', 'text'], true)) ? $q['type'] : 'single';
+
+        if ($type === 'text') {
+            $v = isset($raw[$qi]) ? (string) $raw[$qi] : '';
+            $v = trim(wp_strip_all_tags(wp_unslash($v)));
+            $answers[$qi] = $v;
+            continue;
+        }
+
         $opts_count = (isset($q['options']) && is_array($q['options'])) ? count($q['options']) : 0;
         if ($opts_count < 2) continue;
 
@@ -1575,23 +1649,69 @@ function cl_normalize_exam_answers($raw, $def) {
     return $answers;
 }
 
-function cl_calculate_exam_score($answers, $def) {
-    $total = 0;
-    $ok = 0;
+function cl_calculate_exam_auto($answers, $def) {
+    $breakdown = [];
+    $total_points = 0.0;
+    $earned_points = 0.0;
+
     foreach ($def['questions'] as $qi => $q) {
-        $total++;
-        $selected = isset($answers[$qi]) ? (array)$answers[$qi] : [];
+        $type = (isset($q['type']) && in_array($q['type'], ['single', 'multi', 'text'], true)) ? $q['type'] : 'single';
+        $points = isset($q['points']) ? (float) $q['points'] : 1.0;
+        if (!is_finite($points) || $points < 0) $points = 1.0;
+
+        $earned = 0.0;
         $correct = [];
-        foreach ($q['options'] as $oi => $opt) {
-            if (!empty($opt['is_correct'])) $correct[] = (string)$oi;
+        $selected = null;
+        $text_answer = '';
+        $needs_manual = false;
+
+        if ($type === 'text') {
+            $needs_manual = true;
+            $text_answer = isset($answers[$qi]) ? (string) $answers[$qi] : '';
+            $earned = 0.0;
+        } else {
+            $selected_arr = isset($answers[$qi]) ? (array)$answers[$qi] : [];
+            $selected_arr = array_values(array_unique(array_map('strval', $selected_arr)));
+            sort($selected_arr);
+            $selected = $selected_arr;
+
+            $correct = [];
+            if (isset($q['options']) && is_array($q['options'])) {
+                foreach ($q['options'] as $oi => $opt) {
+                    if (!empty($opt['is_correct'])) $correct[] = (string)$oi;
+                }
+            }
+            sort($correct);
+            $earned = ($selected_arr === $correct) ? $points : 0.0;
         }
-        sort($correct);
-        $sel = array_values(array_unique(array_map('strval', $selected)));
-        sort($sel);
-        if ($sel === $correct) $ok++;
+
+        $total_points += $points;
+        $earned_points += $earned;
+
+        $breakdown[$qi] = [
+            'type' => $type,
+            'points' => (float) $points,
+            'earned' => (float) $earned,
+            'needs_manual' => $needs_manual ? 1 : 0,
+            'selected' => $selected,
+            'correct' => $correct,
+            'text_answer' => $text_answer,
+        ];
     }
-    if ($total <= 0) return 0;
-    return round(($ok / $total) * 100, 2);
+
+    $score = ($total_points > 0) ? round(($earned_points / $total_points) * 100, 2) : 0.0;
+    return [
+        'score' => $score,
+        'earned_points' => round($earned_points, 4),
+        'total_points' => round($total_points, 4),
+        'breakdown' => $breakdown,
+    ];
+}
+
+function cl_calculate_exam_score($answers, $def) {
+    // Backward compat: devolver % (0-100)
+    $auto = cl_calculate_exam_auto($answers, $def);
+    return (float) ($auto['score'] ?? 0);
 }
 
 function cl_notify_admin_exam_submitted($attempt_id) {
@@ -1930,15 +2050,55 @@ function cl_render_examen_admin_detail($attempt_id) {
     $leccion = get_post($leccion_id);
     $user = get_user_by('id', $user_id);
 
+    $def = get_post_meta($leccion_id, '_cl_exam_definition', true);
+    if (!is_array($def) || empty($def['questions'])) {
+        $def = ['questions' => []];
+    }
+
+    // Breakdown auto (para precargar puntuación por pregunta)
+    $auto_breakdown = get_post_meta($attempt_id, '_cl_auto_breakdown', true);
+    if (!is_array($auto_breakdown)) {
+        $auto_calc = cl_calculate_exam_auto($answers, $def);
+        $auto_breakdown = is_array($auto_calc['breakdown'] ?? null) ? $auto_calc['breakdown'] : [];
+    }
+
     // Procesar acciones
     if (!empty($_POST['cl_exam_action']) && check_admin_referer('cl_exam_review_' . $attempt_id)) {
         $action = sanitize_text_field($_POST['cl_exam_action']);
-        $final_score = isset($_POST['cl_final_score']) ? floatval($_POST['cl_final_score']) : null;
         $note = isset($_POST['cl_admin_note']) ? wp_kses_post(wp_unslash($_POST['cl_admin_note'])) : '';
 
         if ($action === 'approve') {
+            // Puntuación por pregunta (si viene), con fallback a auto
+            $posted_scores = isset($_POST['cl_q_score']) && is_array($_POST['cl_q_score']) ? $_POST['cl_q_score'] : [];
+            $final_breakdown = [];
+            $total_points = 0.0;
+            $final_points = 0.0;
+
+            foreach ($def['questions'] as $qi => $q) {
+                $points = isset($q['points']) ? (float)$q['points'] : 1.0;
+                if (!is_finite($points) || $points < 0) $points = 1.0;
+                $total_points += $points;
+
+                $auto_earned = isset($auto_breakdown[$qi]['earned']) ? (float)$auto_breakdown[$qi]['earned'] : 0.0;
+                $earned = $auto_earned;
+                if (isset($posted_scores[$qi])) {
+                    $earned = (float) str_replace(',', '.', (string) $posted_scores[$qi]);
+                }
+                if (!is_finite($earned)) $earned = $auto_earned;
+                $earned = max(0.0, min($points, $earned));
+                $final_points += $earned;
+
+                $final_breakdown[$qi] = is_array($auto_breakdown[$qi] ?? null) ? $auto_breakdown[$qi] : [];
+                $final_breakdown[$qi]['points'] = (float)$points;
+                $final_breakdown[$qi]['earned'] = (float)$earned;
+            }
+
+            $final_score = ($total_points > 0) ? round(($final_points / $total_points) * 100, 2) : 0.0;
             update_post_meta($attempt_id, '_cl_status', 'approved');
-            update_post_meta($attempt_id, '_cl_final_score', is_null($final_score) ? $auto : $final_score);
+            update_post_meta($attempt_id, '_cl_final_score', $final_score);
+            update_post_meta($attempt_id, '_cl_final_points', round($final_points, 4));
+            update_post_meta($attempt_id, '_cl_total_points', round($total_points, 4));
+            update_post_meta($attempt_id, '_cl_final_breakdown', $final_breakdown);
             update_post_meta($attempt_id, '_cl_admin_note', $note);
             update_post_meta($attempt_id, '_cl_reviewed_by', get_current_user_id());
             update_post_meta($attempt_id, '_cl_reviewed_at', current_time('mysql'));
@@ -1973,12 +2133,6 @@ function cl_render_examen_admin_detail($attempt_id) {
     echo '<p><strong>Auto-score:</strong> ' . esc_html(is_numeric($auto) ? (round((float)$auto, 2) . '%') : '-') . '</p>';
     echo '<p><strong>Nota final:</strong> ' . esc_html(is_numeric($final) ? (round((float)$final, 2) . '%') : '-') . '</p>';
 
-    $def = get_post_meta($leccion_id, '_cl_exam_definition', true);
-    if (!is_array($def) || empty($def['questions'])) {
-        echo '<p>El examen no tiene definición.</p>';
-        return;
-    }
-
     echo '<h3>Respuestas del alumno</h3>';
     echo '<div class="cl-exam-admin-review">';
     foreach ($def['questions'] as $qi => $q) {
@@ -1987,24 +2141,45 @@ function cl_render_examen_admin_detail($attempt_id) {
         if (!empty($q['image_id'])) {
             echo '<div style="margin:8px 0;">' . wp_get_attachment_image((int)$q['image_id'], 'medium') . '</div>';
         }
-        $sel = isset($answers[$qi]) ? (array)$answers[$qi] : [];
-        $sel = array_map('strval', $sel);
-        $cor = [];
-        foreach ($q['options'] as $oi => $opt) {
-            if (!empty($opt['is_correct'])) $cor[] = (string)$oi;
+        $qtype = (isset($q['type']) && in_array($q['type'], ['single', 'multi', 'text'], true)) ? $q['type'] : 'single';
+        $points = isset($q['points']) ? (float)$q['points'] : 1.0;
+        if (!is_finite($points) || $points < 0) $points = 1.0;
+
+        $auto_earned = isset($auto_breakdown[$qi]['earned']) ? (float)$auto_breakdown[$qi]['earned'] : 0.0;
+
+        echo '<div class="cl-exam-admin-points">';
+        echo '<span class="cl-exam-admin-points-max"><strong>Puntos:</strong> ' . esc_html(round($auto_earned, 2)) . ' / ' . esc_html(round($points, 2)) . ' (auto)</span>';
+        echo '</div>';
+
+        if ($qtype === 'text') {
+            $txt = isset($answers[$qi]) ? (string)$answers[$qi] : '';
+            echo '<div class="cl-exam-admin-text">';
+            echo '<div><strong>Respuesta del alumno:</strong></div>';
+            echo '<div class="cl-exam-admin-text-body">' . nl2br(esc_html($txt)) . '</div>';
+            echo '</div>';
+        } else {
+            $sel = isset($answers[$qi]) ? (array)$answers[$qi] : [];
+            $sel = array_values(array_unique(array_map('strval', $sel)));
+            $cor = [];
+            if (isset($q['options']) && is_array($q['options'])) {
+                foreach ($q['options'] as $oi => $opt) {
+                    if (!empty($opt['is_correct'])) $cor[] = (string)$oi;
+                }
+            }
+            $cor = array_values(array_unique($cor));
+            echo '<ul class="cl-exam-admin-opts">';
+            foreach ($q['options'] as $oi => $opt) {
+                $is_sel = in_array((string)$oi, $sel, true);
+                $is_cor = in_array((string)$oi, $cor, true);
+                $cls = 'cl-exam-admin-opt';
+                if ($is_cor) $cls .= ' is-correct';
+                if ($is_sel) $cls .= ' is-selected';
+                if ($is_sel && !$is_cor) $cls .= ' is-wrong';
+                if (!$is_sel && $is_cor) $cls .= ' is-missed';
+                echo '<li class="' . esc_attr($cls) . '">' . wp_kses_post($opt['text']) . '</li>';
+            }
+            echo '</ul>';
         }
-        sort($cor);
-        echo '<ul>';
-        foreach ($q['options'] as $oi => $opt) {
-            $is_sel = in_array((string)$oi, $sel, true);
-            $is_cor = in_array((string)$oi, $cor, true);
-            $tag = '';
-            if ($is_cor) $tag .= ' <strong>(correcta)</strong>';
-            if ($is_sel && !$is_cor) $tag .= ' <em>(seleccionada)</em>';
-            if ($is_sel && $is_cor) $tag .= ' <strong>(seleccionada)</strong>';
-            echo '<li>' . wp_kses_post($opt['text']) . $tag . '</li>';
-        }
-        echo '</ul>';
         echo '</div>';
     }
     echo '</div>';
@@ -2012,7 +2187,23 @@ function cl_render_examen_admin_detail($attempt_id) {
     echo '<h3>Acciones</h3>';
     echo '<form method="post">';
     wp_nonce_field('cl_exam_review_' . $attempt_id);
-    echo '<p><label>Nota final (%) <input type="number" step="0.01" name="cl_final_score" value="' . esc_attr(is_numeric($final) ? $final : $auto) . '" /></label></p>';
+    echo '<p class="description">Puedes ajustar la puntuación por pregunta. La nota final se recalcula automáticamente al aprobar.</p>';
+    echo '<div class="cl-exam-admin-score-grid">';
+    foreach ($def['questions'] as $qi => $q) {
+        $points = isset($q['points']) ? (float)$q['points'] : 1.0;
+        if (!is_finite($points) || $points < 0) $points = 1.0;
+        $auto_earned = isset($auto_breakdown[$qi]['earned']) ? (float)$auto_breakdown[$qi]['earned'] : 0.0;
+        echo '<div class="cl-exam-admin-score-row">';
+        echo '<div class="cl-exam-admin-score-label"><strong>' . esc_html($qi + 1) . '.</strong> ' . esc_html(wp_strip_all_tags($q['text'])) . '</div>';
+        echo '<div class="cl-exam-admin-score-input">';
+        echo '<label>Puntos obtenidos ';
+        echo '<input type="number" step="0.25" min="0" max="' . esc_attr($points) . '" name="cl_q_score[' . esc_attr($qi) . ']" value="' . esc_attr($auto_earned) . '" style="width:110px;" />';
+        echo ' / ' . esc_html(round($points, 2)) . '</label>';
+        echo '</div>';
+        echo '</div>';
+    }
+    echo '</div>';
+
     echo '<p><label>Nota del profesor<br><textarea name="cl_admin_note" rows="4" style="width:100%;">' . esc_textarea((string)get_post_meta($attempt_id, '_cl_admin_note', true)) . '</textarea></label></p>';
     echo '<p>';
     echo '<button class="button button-primary" type="submit" name="cl_exam_action" value="approve">Aprobar</button> ';

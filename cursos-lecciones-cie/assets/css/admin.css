@@ -38,3 +38,75 @@ button.button-secondary:hover { background:#d32f2f; }
     border-radius:16px;
     background-color:lightgreen;
 }
+
+/* =========================
+   ADMIN: revisión examen
+========================= */
+.cl-exam-admin-review {
+    margin-top: 10px;
+}
+
+.cl-exam-admin-q {
+    background: #fff;
+    border: 1px solid #e6e6e6;
+    border-radius: 8px;
+    padding: 12px;
+    margin: 0 0 12px;
+}
+
+.cl-exam-admin-opts {
+    margin: 10px 0 0;
+}
+
+.cl-exam-admin-opt.is-correct {
+    color: #1e7e34;
+    font-weight: 600;
+}
+
+.cl-exam-admin-opt.is-selected {
+    background: #f3f3f3;
+}
+
+.cl-exam-admin-opt.is-wrong {
+    color: #cc1818;
+}
+
+.cl-exam-admin-opt.is-missed {
+    text-decoration: underline;
+}
+
+.cl-exam-admin-text-body {
+    margin-top: 6px;
+    padding: 10px 12px;
+    border: 1px solid #e6e6e6;
+    border-radius: 6px;
+    background: #fafafa;
+}
+
+.cl-exam-admin-score-grid {
+    margin: 10px 0 16px;
+    border: 1px solid #e6e6e6;
+    border-radius: 8px;
+    background: #fff;
+    padding: 10px;
+}
+
+.cl-exam-admin-score-row {
+    display: flex;
+    gap: 14px;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 6px;
+    border-bottom: 1px solid #f0f0f0;
+}
+.cl-exam-admin-score-row:last-child {
+    border-bottom: none;
+}
+
+.cl-exam-admin-score-label {
+    flex: 1;
+}
+
+.cl-exam-admin-score-input {
+    flex-shrink: 0;
+}

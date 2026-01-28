@@ -309,7 +309,9 @@
         }
 
         function isAnswered($step){
-            return $step.find('input[type="radio"]:checked, input[type="checkbox"]:checked').length > 0;
+            if($step.find('input[type="radio"]:checked, input[type="checkbox"]:checked').length > 0) return true;
+            const txt = String($step.find('textarea').val() || '').trim();
+            return txt.length > 0;
         }
 
         function renderReview(){
