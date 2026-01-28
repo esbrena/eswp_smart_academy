@@ -720,7 +720,8 @@ add_action('admin_enqueue_scripts', function($hook) {
         wp_enqueue_script(
             'cl-admin-exam-js',
             plugin_dir_url(__FILE__) . 'assets/js/admin-exam.js',
-            ['jquery'],
+            // Importante: asegurar wp.media disponible antes del script (selector de vídeo)
+            ['jquery', 'media-editor', 'media-views'],
             CL_CIE_VERSION,
             true
         );
@@ -837,6 +838,49 @@ add_action('wp_ajax_cl_actualizar_titulo_leccion', function() {
     if (!current_user_can('edit_post', $leccion_id)) wp_send_json_error('Permisos insuficientes');
     wp_update_post(['ID' => $leccion_id, 'post_title' => $titulo]);
     wp_send_json_success(true);
+});
+
+/* =====================================================
+   AL BORRAR / ENVIAR A PAPELERA UN CURSO: gestionar lecciones hijas
+===================================================== */
+function cl_get_course_child_lessons($curso_id) {
+    return get_posts([
+        'post_type' => 'lecciones-cie',
+        'post_parent' => (int)$curso_id,
+        'numberposts' => -1,
+        'post_status' => 'any',
+        'fields' => 'ids',
+    ]);
+}
+
+add_action('wp_trash_post', function($post_id) {
+    if (get_post_type($post_id) !== 'curso-cie') return;
+    $children = cl_get_course_child_lessons($post_id);
+    foreach ($children as $lid) {
+        if (get_post_type($lid) === 'lecciones-cie') {
+            wp_trash_post($lid);
+        }
+    }
+});
+
+add_action('untrash_post', function($post_id) {
+    if (get_post_type($post_id) !== 'curso-cie') return;
+    $children = cl_get_course_child_lessons($post_id);
+    foreach ($children as $lid) {
+        if (get_post_type($lid) === 'lecciones-cie') {
+            wp_untrash_post($lid);
+        }
+    }
+});
+
+add_action('before_delete_post', function($post_id) {
+    if (get_post_type($post_id) !== 'curso-cie') return;
+    $children = cl_get_course_child_lessons($post_id);
+    foreach ($children as $lid) {
+        if (get_post_type($lid) === 'lecciones-cie') {
+            wp_delete_post($lid, true);
+        }
+    }
 });
 
 /* =====================================================

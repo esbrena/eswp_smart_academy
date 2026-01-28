@@ -68,8 +68,8 @@ jQuery(function($){
 
     function applyVisibility(){
         const tipo = getLessonType();
-        const $examBox = $('#cl_leccion_examen');
-        const $videoBox = $('#cl_leccion_video');
+        const $examBox = $('#cl_leccion_examen').closest('.postbox');
+        const $videoBox = $('#cl_leccion_video').closest('.postbox');
 
         // Normal: ocultar todo; Video: mostrar video; Examen: mostrar examen
         if(tipo === 'video'){

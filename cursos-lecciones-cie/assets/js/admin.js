@@ -5,6 +5,11 @@ jQuery(document).ready(function($){
         let titulo = $('#cl-nueva-leccion-titulo').val();
         let curso_id = cl_ajax.post_id || $('#post_ID').val();
 
+        if(!curso_id || String(curso_id) === '0'){
+            alert('Primero guarda el curso como borrador para poder añadir lecciones.');
+            return;
+        }
+
         if(titulo.length === 0) return alert('Escribe un título');
 
         $.post(cl_ajax.ajax_url, {
