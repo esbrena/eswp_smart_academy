@@ -22,6 +22,7 @@ define('CL_META_EXAM_TIME_SECONDS', '_cl_exam_time_seconds'); // int seconds
 // Lecciones (reemplazo de ACF "Contenido de lección")
 define('CL_META_LESSON_TYPE', '_cl_tipo_de_leccion'); // normal | video | examen
 define('CL_META_LESSON_VIDEO', '_cl_video_tracking'); // string (embed/html/shortcode)
+define('CL_META_LESSON_VIDEO_ATTACHMENT_ID', '_cl_video_attachment_id'); // int attachment ID (wp media)
 define('CL_META_LESSON_MIN_SECONDS', '_cl_tiempo_minimo_seconds'); // int seconds
 
 /* =====================================================
@@ -487,6 +488,31 @@ function cl_get_leccion_video_content($leccion_id) {
     return '';
 }
 
+function cl_get_leccion_video_attachment_id($leccion_id) {
+    $id = (int) get_post_meta($leccion_id, CL_META_LESSON_VIDEO_ATTACHMENT_ID, true);
+    return $id > 0 ? $id : 0;
+}
+
+function cl_render_leccion_video_frontend($leccion_id) {
+    $att_id = cl_get_leccion_video_attachment_id($leccion_id);
+    if ($att_id > 0) {
+        $url = wp_get_attachment_url($att_id);
+        if (!$url) return '';
+        $mime = get_post_mime_type($att_id);
+        $type_attr = $mime ? ' type="' . esc_attr($mime) . '"' : '';
+        $html = '<video controls preload="metadata" style="max-width:100%; height:auto;">';
+        $html .= '<source src="' . esc_url($url) . '"' . $type_attr . ' />';
+        $html .= 'Tu navegador no soporta vídeo HTML5.';
+        $html .= '</video>';
+        return $html;
+    }
+
+    // Fallback: contenido legacy (embed/shortcode)
+    $raw = cl_get_leccion_video_content($leccion_id);
+    if ($raw === '') return '';
+    return apply_filters('the_content', $raw);
+}
+
 function cl_get_leccion_min_time_seconds($leccion_id) {
     $sec = get_post_meta($leccion_id, CL_META_LESSON_MIN_SECONDS, true);
     if ($sec !== '' && $sec !== null) return max(0, (int)$sec);
@@ -503,8 +529,8 @@ function cl_get_leccion_min_time_seconds($leccion_id) {
 function cl_render_leccion_contenido_metabox($post) {
     wp_nonce_field('cl_leccion_contenido_save', 'cl_leccion_contenido_nonce');
     $tipo = cl_get_tipo_de_leccion($post->ID);
-    $video = get_post_meta($post->ID, CL_META_LESSON_VIDEO, true);
-    if (!is_string($video)) $video = '';
+    $video_attachment_id = (int) get_post_meta($post->ID, CL_META_LESSON_VIDEO_ATTACHMENT_ID, true);
+    $video_attachment_id = $video_attachment_id > 0 ? $video_attachment_id : 0;
     $min_seconds = cl_get_leccion_min_time_seconds($post->ID);
     $min_mmss = $min_seconds > 0 ? cl_seconds_to_human_mmss($min_seconds) : '';
     ?>
@@ -520,8 +546,19 @@ function cl_render_leccion_contenido_metabox($post) {
 
     <div class="cl-leccion-field cl-leccion-video-field">
         <label style="display:block; font-weight:600; margin-bottom:6px;">Vídeo</label>
-        <textarea name="cl_video_tracking" rows="4" style="width:100%;" placeholder="Pega aquí el embed / shortcode / HTML"><?php echo esc_textarea($video); ?></textarea>
-        <span class="description">Se renderiza usando `the_content` (shortcodes + oEmbed/HTML).</span>
+        <input type="hidden" name="cl_video_attachment_id" id="cl-video-attachment-id" value="<?php echo esc_attr($video_attachment_id); ?>" />
+        <div id="cl-video-preview" style="margin:0 0 8px;">
+            <?php if ($video_attachment_id): ?>
+                <?php echo wp_get_attachment_link($video_attachment_id, '', false, false, 'Ver archivo'); ?>
+            <?php else: ?>
+                <em>Sin archivo seleccionado</em>
+            <?php endif; ?>
+        </div>
+        <p style="margin:0;">
+            <button type="button" class="button" id="cl-pick-video">Seleccionar vídeo</button>
+            <button type="button" class="button" id="cl-clear-video">Quitar</button>
+        </p>
+        <span class="description">Selecciona un archivo subido a WordPress (recomendado MP4).</span>
     </div>
 
     <div class="cl-leccion-field cl-leccion-time-field" style="margin-top:10px;">
@@ -582,8 +619,8 @@ add_action('save_post_lecciones-cie', function($post_id) {
         // Mantener compat: meta antigua solo normal/examen (para código legacy)
         update_post_meta($post_id, '_cl_leccion_tipo', $tipo === 'examen' ? 'examen' : 'normal');
 
-        $video = isset($_POST['cl_video_tracking']) ? wp_kses_post(wp_unslash($_POST['cl_video_tracking'])) : '';
-        update_post_meta($post_id, CL_META_LESSON_VIDEO, $video);
+        $video_attachment_id = isset($_POST['cl_video_attachment_id']) ? absint($_POST['cl_video_attachment_id']) : 0;
+        update_post_meta($post_id, CL_META_LESSON_VIDEO_ATTACHMENT_ID, $video_attachment_id);
 
         $mmss = isset($_POST['cl_tiempo_minimo_mmss']) ? sanitize_text_field(wp_unslash($_POST['cl_tiempo_minimo_mmss'])) : '';
         $seconds = cl_parse_mmss_to_seconds($mmss);
@@ -839,7 +876,7 @@ add_shortcode('cl_leccion_curso', function(){
     }
 
     $contenido = apply_filters('the_content', $leccion_actual->post_content);
-    $video = cl_get_leccion_video_content($leccion_actual->ID);
+    $video = cl_render_leccion_video_frontend($leccion_actual->ID);
     $tiempo_minimo_seg = cl_get_leccion_min_time_seconds($leccion_actual->ID);
 
     // Tiempo guardado previamente (para no resetear al volver a entrar)

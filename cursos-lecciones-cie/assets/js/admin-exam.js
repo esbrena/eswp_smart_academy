@@ -3,6 +3,46 @@ jQuery(function($){
     const $list = $('#cl-exam-questions');
     const $addQ = $('#cl-exam-add-question');
 
+    // Selector de vídeo (WordPress Media Library) en metabox "Contenido de lección"
+    (function(){
+        const $pick = $('#cl-pick-video');
+        const $clear = $('#cl-clear-video');
+        const $id = $('#cl-video-attachment-id');
+        const $preview = $('#cl-video-preview');
+        if(!$pick.length || !$id.length || !$preview.length) return;
+
+        let frame = null;
+        $pick.on('click', function(e){
+            e.preventDefault();
+            if(frame){
+                frame.open();
+                return;
+            }
+            frame = wp.media({
+                title: 'Selecciona un vídeo',
+                button: { text: 'Usar este vídeo' },
+                library: { type: 'video' },
+                multiple: false
+            });
+            frame.on('select', function(){
+                const attachment = frame.state().get('selection').first().toJSON();
+                $id.val(attachment.id);
+                const url = attachment.url || '';
+                const filename = attachment.filename || ('Adjunto ' + attachment.id);
+                const safeUrl = $('<div>').text(url).html();
+                const safeName = $('<div>').text(filename).html();
+                $preview.html('<a href="'+safeUrl+'" target="_blank" rel="noreferrer">Ver archivo</a> <code style="margin-left:6px;">ID: '+attachment.id+'</code> <span style="margin-left:6px;">'+safeName+'</span>');
+            });
+            frame.open();
+        });
+
+        $clear.on('click', function(e){
+            e.preventDefault();
+            $id.val('0');
+            $preview.html('<em>Sin archivo seleccionado</em>');
+        });
+    })();
+
     // Mostrar/ocultar el bloque de examen según tipo de lección (ACF o metabox propio)
     function getLessonType(){
         // Preferir el plugin: select #cl-tipo-de-leccion
