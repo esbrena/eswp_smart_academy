@@ -5,39 +5,50 @@ jQuery(function($){
 
     // Mostrar/ocultar el bloque de examen según tipo de lección (ACF o metabox propio)
     function getLessonType(){
-        // Preferir ACF: wrapper con data-name="tipo_leccion"
-        const $acf = $('.acf-field[data-name="tipo_leccion"]');
-        if($acf.length){
-            let val = '';
-            const $sel = $acf.find('select');
-            if($sel.length){
-                val = $sel.val();
-            } else {
-                const $checked = $acf.find('input:checked');
-                if($checked.length) val = $checked.val();
-                else val = $acf.find('input').first().val();
-            }
-            val = String(val || '').toLowerCase().trim();
-            return (val === 'examen' || val === 'exam') ? 'examen' : 'normal';
+        // Preferir el plugin: select #cl-tipo-de-leccion
+        const vPlugin = String($('#cl-tipo-de-leccion').val() || '').toLowerCase().trim();
+        if(vPlugin) return vPlugin;
+
+        // Backward: ACF (nuevo) data-name="tipo_de_leccion"
+        const $acfNew = $('.acf-field[data-name="tipo_de_leccion"]');
+        if($acfNew.length){
+            const v = String($acfNew.find('select').val() || $acfNew.find('input:checked').val() || '').toLowerCase().trim();
+            if(v) return v;
         }
-        // Fallback: metabox propio
-        const v = String($('input[name="cl_leccion_tipo"]:checked').val() || 'normal').toLowerCase();
-        return (v === 'examen') ? 'examen' : 'normal';
+
+        // Backward: ACF (antiguo) data-name="tipo_leccion"
+        const $acfOld = $('.acf-field[data-name="tipo_leccion"]');
+        if($acfOld.length){
+            const v = String($acfOld.find('select').val() || $acfOld.find('input:checked').val() || '').toLowerCase().trim();
+            if(v) return v;
+        }
+
+        return 'normal';
     }
 
     function applyVisibility(){
         const tipo = getLessonType();
         const $mb = $('#cl_leccion_examen');
+        const $videoField = $('.cl-leccion-video-field');
         if(!$mb.length) return;
-        if(tipo === 'examen'){
+        if(tipo === 'examen' || tipo === 'exam'){
             $mb.show();
         } else {
             $mb.hide();
         }
+
+        if($videoField.length){
+            if(tipo === 'video'){
+                $videoField.show();
+            } else {
+                $videoField.hide();
+            }
+        }
     }
 
+    $(document).on('change', '#cl-tipo-de-leccion', applyVisibility);
+    $(document).on('change', '.acf-field[data-name="tipo_de_leccion"] select, .acf-field[data-name="tipo_de_leccion"] input', applyVisibility);
     $(document).on('change', '.acf-field[data-name="tipo_leccion"] select, .acf-field[data-name="tipo_leccion"] input', applyVisibility);
-    $(document).on('change', 'input[name="cl_leccion_tipo"]', applyVisibility);
     applyVisibility();
 
     if(!$input.length || !$list.length) return;

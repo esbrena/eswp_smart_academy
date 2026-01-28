@@ -19,6 +19,11 @@ define('CL_META_COURSE_AUTOEVAL', '_cl_course_autoeval'); // 0/1
 define('CL_META_COURSE_EXAM_NOTIFY_USER', '_cl_exam_notify_user_id'); // int user id
 define('CL_META_EXAM_TIME_SECONDS', '_cl_exam_time_seconds'); // int seconds
 
+// Lecciones (reemplazo de ACF "Contenido de lección")
+define('CL_META_LESSON_TYPE', '_cl_tipo_de_leccion'); // normal | video | examen
+define('CL_META_LESSON_VIDEO', '_cl_video_tracking'); // string (embed/html/shortcode)
+define('CL_META_LESSON_MIN_SECONDS', '_cl_tiempo_minimo_seconds'); // int seconds
+
 /* =====================================================
    COMPAT ACF (para poder desinstalar ACF sin fatal)
 ===================================================== */
@@ -114,6 +119,27 @@ function cl_seconds_to_human_mmss($seconds) {
     $m = (int) floor($seconds / 60);
     $s = $seconds % 60;
     return sprintf('%02d:%02d', $m, $s);
+}
+
+function cl_parse_mmss_to_seconds($value) {
+    if ($value === null || $value === false) return 0;
+    $value = trim((string)$value);
+    if ($value === '') return 0;
+    if (is_numeric($value)) return max(0, (int)$value);
+
+    // 00:00 (i:s)
+    if (preg_match('/^\d+:\d{2}$/', $value)) {
+        [$m, $s] = array_map('intval', explode(':', $value));
+        return max(0, ($m * 60) + $s);
+    }
+
+    // 00:00:00 (H:i:s)
+    if (preg_match('/^\d+:\d{2}:\d{2}$/', $value)) {
+        [$h, $m, $s] = array_map('intval', explode(':', $value));
+        return max(0, ($h * 3600) + ($m * 60) + $s);
+    }
+
+    return 0;
 }
 
 /* =====================================================
@@ -396,13 +422,13 @@ function cl_render_sidebar_lecciones($curso_id, $leccion_actual_id){
 }
 
 /* =====================================================
-   LECCIÓN: TIPO (normal / examen) + DEFINICIÓN DE EXAMEN
+   LECCIÓN: CONTENIDO (tipo/video/tiempo mínimo) + DEFINICIÓN DE EXAMEN
 ===================================================== */
 add_action('add_meta_boxes', function() {
     add_meta_box(
-        'cl_leccion_tipo',
-        'Tipo de lección',
-        'cl_render_leccion_tipo_metabox',
+        'cl_leccion_contenido',
+        'Contenido de lección',
+        'cl_render_leccion_contenido_metabox',
         'lecciones-cie',
         'side',
         'high'
@@ -418,34 +444,91 @@ add_action('add_meta_boxes', function() {
     );
 });
 
-function cl_get_leccion_tipo($leccion_id) {
-    // Si existe ACF con un campo "tipo_leccion", tomarlo como fuente de verdad
-    $acf_tipo = cl_get_field_compat('tipo_leccion', $leccion_id);
-    if (is_string($acf_tipo) && $acf_tipo !== '') {
-        $acf_tipo = strtolower(trim($acf_tipo));
-        if (in_array($acf_tipo, ['examen', 'exam'], true)) return 'examen';
-        return 'normal';
+function cl_get_tipo_de_leccion($leccion_id) {
+    $tipo = get_post_meta($leccion_id, CL_META_LESSON_TYPE, true);
+    if (is_string($tipo) && $tipo !== '') {
+        $tipo = strtolower(trim($tipo));
+        if (in_array($tipo, ['normal', 'video', 'examen'], true)) return $tipo;
     }
 
-    $tipo = get_post_meta($leccion_id, '_cl_leccion_tipo', true);
-    return in_array($tipo, ['normal', 'examen'], true) ? $tipo : 'normal';
+    // Backward compatibility: ACF (antiguo y nuevo)
+    $acf_tipo = cl_get_field_compat('tipo_de_leccion', $leccion_id);
+    if (is_string($acf_tipo) && $acf_tipo !== '') {
+        $acf_tipo = strtolower(trim($acf_tipo));
+        if (in_array($acf_tipo, ['normal', 'video', 'examen'], true)) return $acf_tipo;
+        if (in_array($acf_tipo, ['exam'], true)) return 'examen';
+    }
+    $acf_tipo2 = cl_get_field_compat('tipo_leccion', $leccion_id);
+    if (is_string($acf_tipo2) && $acf_tipo2 !== '') {
+        $acf_tipo2 = strtolower(trim($acf_tipo2));
+        if (in_array($acf_tipo2, ['examen', 'exam'], true)) return 'examen';
+    }
+
+    // Backward compatibility: meta antiguo (solo normal/examen)
+    $old = get_post_meta($leccion_id, '_cl_leccion_tipo', true);
+    if (in_array($old, ['normal', 'examen'], true)) return $old;
+
+    return 'normal';
 }
 
-function cl_render_leccion_tipo_metabox($post) {
-    $tipo = cl_get_leccion_tipo($post->ID);
-    wp_nonce_field('cl_leccion_tipo_save', 'cl_leccion_tipo_nonce');
+function cl_get_leccion_tipo($leccion_id) {
+    // API interna existente (solo normal/examen)
+    return cl_get_tipo_de_leccion($leccion_id) === 'examen' ? 'examen' : 'normal';
+}
+
+function cl_get_leccion_video_content($leccion_id) {
+    $v = get_post_meta($leccion_id, CL_META_LESSON_VIDEO, true);
+    if (is_string($v) && trim($v) !== '') return $v;
+    // Backward compat ACF/meta
+    $v = cl_get_field_compat('video-tracking', $leccion_id);
+    if (is_string($v) && trim($v) !== '') return $v;
+    $v = cl_get_field_compat('video_tracking', $leccion_id);
+    if (is_string($v) && trim($v) !== '') return $v;
+    return '';
+}
+
+function cl_get_leccion_min_time_seconds($leccion_id) {
+    $sec = get_post_meta($leccion_id, CL_META_LESSON_MIN_SECONDS, true);
+    if ($sec !== '' && $sec !== null) return max(0, (int)$sec);
+    // Backward compat: ACF i:s / H:i:s
+    $raw = cl_get_field_compat('tiempo_minimo', $leccion_id);
+    if (is_string($raw) || is_numeric($raw)) {
+        $s = cl_parse_mmss_to_seconds($raw);
+        if ($s > 0) return $s;
+        return cl_parse_time_to_seconds($raw);
+    }
+    return 0;
+}
+
+function cl_render_leccion_contenido_metabox($post) {
+    wp_nonce_field('cl_leccion_contenido_save', 'cl_leccion_contenido_nonce');
+    $tipo = cl_get_tipo_de_leccion($post->ID);
+    $video = get_post_meta($post->ID, CL_META_LESSON_VIDEO, true);
+    if (!is_string($video)) $video = '';
+    $min_seconds = cl_get_leccion_min_time_seconds($post->ID);
+    $min_mmss = $min_seconds > 0 ? cl_seconds_to_human_mmss($min_seconds) : '';
     ?>
-    <p>
-        <label style="display:block; margin-bottom:6px;">
-            <input type="radio" name="cl_leccion_tipo" value="normal" <?php checked($tipo, 'normal'); ?> />
-            Normal
-        </label>
-        <label style="display:block;">
-            <input type="radio" name="cl_leccion_tipo" value="examen" <?php checked($tipo, 'examen'); ?> />
-            Examen
-        </label>
+    <p style="margin-top:0;">
+        <label style="display:block; font-weight:600; margin-bottom:6px;">Tipo de lección</label>
+        <select name="cl_tipo_de_leccion" id="cl-tipo-de-leccion" style="width:100%;">
+            <option value="normal" <?php selected($tipo, 'normal'); ?>>Normal</option>
+            <option value="video" <?php selected($tipo, 'video'); ?>>Vídeo</option>
+            <option value="examen" <?php selected($tipo, 'examen'); ?>>Examen</option>
+        </select>
+        <span class="description">Este campo controla qué bloques se muestran (vídeo/examen).</span>
     </p>
-    <p class="description">Si seleccionas "Examen", podrás definir preguntas y respuestas en el bloque de abajo.</p>
+
+    <div class="cl-leccion-field cl-leccion-video-field">
+        <label style="display:block; font-weight:600; margin-bottom:6px;">Vídeo</label>
+        <textarea name="cl_video_tracking" rows="4" style="width:100%;" placeholder="Pega aquí el embed / shortcode / HTML"><?php echo esc_textarea($video); ?></textarea>
+        <span class="description">Se renderiza usando `the_content` (shortcodes + oEmbed/HTML).</span>
+    </div>
+
+    <div class="cl-leccion-field cl-leccion-time-field" style="margin-top:10px;">
+        <label style="display:block; font-weight:600; margin-bottom:6px;">Tiempo mínimo (mm:ss)</label>
+        <input type="text" name="cl_tiempo_minimo_mmss" value="<?php echo esc_attr($min_mmss); ?>" placeholder="00:00" style="width:100%;" />
+        <span class="description">Opcional. Si está vacío o 00:00, no hay mínimo.</span>
+    </div>
     <?php
 }
 
@@ -490,10 +573,21 @@ add_action('save_post_lecciones-cie', function($post_id) {
     if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) return;
     if (!current_user_can('edit_post', $post_id)) return;
 
-    if (isset($_POST['cl_leccion_tipo_nonce']) && wp_verify_nonce($_POST['cl_leccion_tipo_nonce'], 'cl_leccion_tipo_save')) {
-        $tipo = isset($_POST['cl_leccion_tipo']) ? sanitize_text_field($_POST['cl_leccion_tipo']) : 'normal';
-        if (!in_array($tipo, ['normal', 'examen'], true)) $tipo = 'normal';
-        update_post_meta($post_id, '_cl_leccion_tipo', $tipo);
+    if (isset($_POST['cl_leccion_contenido_nonce']) && wp_verify_nonce($_POST['cl_leccion_contenido_nonce'], 'cl_leccion_contenido_save')) {
+        $tipo = isset($_POST['cl_tipo_de_leccion']) ? sanitize_text_field($_POST['cl_tipo_de_leccion']) : 'normal';
+        $tipo = strtolower(trim((string)$tipo));
+        if (!in_array($tipo, ['normal', 'video', 'examen'], true)) $tipo = 'normal';
+        update_post_meta($post_id, CL_META_LESSON_TYPE, $tipo);
+
+        // Mantener compat: meta antigua solo normal/examen (para código legacy)
+        update_post_meta($post_id, '_cl_leccion_tipo', $tipo === 'examen' ? 'examen' : 'normal');
+
+        $video = isset($_POST['cl_video_tracking']) ? wp_kses_post(wp_unslash($_POST['cl_video_tracking'])) : '';
+        update_post_meta($post_id, CL_META_LESSON_VIDEO, $video);
+
+        $mmss = isset($_POST['cl_tiempo_minimo_mmss']) ? sanitize_text_field(wp_unslash($_POST['cl_tiempo_minimo_mmss'])) : '';
+        $seconds = cl_parse_mmss_to_seconds($mmss);
+        update_post_meta($post_id, CL_META_LESSON_MIN_SECONDS, max(0, (int)$seconds));
     }
 
     if (isset($_POST['cl_leccion_examen_nonce']) && wp_verify_nonce($_POST['cl_leccion_examen_nonce'], 'cl_leccion_examen_save')) {
@@ -745,9 +839,8 @@ add_shortcode('cl_leccion_curso', function(){
     }
 
     $contenido = apply_filters('the_content', $leccion_actual->post_content);
-    $video = cl_get_field_compat('video-tracking', $leccion_actual->ID);
-    $time = cl_get_field_compat('tiempo_minimo', $leccion_actual->ID);
-    $tiempo_minimo_seg = cl_parse_time_to_seconds($time);
+    $video = cl_get_leccion_video_content($leccion_actual->ID);
+    $tiempo_minimo_seg = cl_get_leccion_min_time_seconds($leccion_actual->ID);
 
     // Tiempo guardado previamente (para no resetear al volver a entrar)
     $tiempos_guardados = get_user_meta($user_id, "cl_curso_{$curso_id}_tiempos", true);
