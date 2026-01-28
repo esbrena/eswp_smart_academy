@@ -68,21 +68,19 @@ jQuery(function($){
 
     function applyVisibility(){
         const tipo = getLessonType();
-        const $mb = $('#cl_leccion_examen');
-        const $videoField = $('.cl-leccion-video-field');
-        if(!$mb.length) return;
-        if(tipo === 'examen' || tipo === 'exam'){
-            $mb.show();
-        } else {
-            $mb.hide();
-        }
+        const $examBox = $('#cl_leccion_examen');
+        const $videoBox = $('#cl_leccion_video');
 
-        if($videoField.length){
-            if(tipo === 'video'){
-                $videoField.show();
-            } else {
-                $videoField.hide();
-            }
+        // Normal: ocultar todo; Video: mostrar video; Examen: mostrar examen
+        if(tipo === 'video'){
+            if($videoBox.length) $videoBox.show();
+            if($examBox.length) $examBox.hide();
+        } else if(tipo === 'examen' || tipo === 'exam'){
+            if($videoBox.length) $videoBox.hide();
+            if($examBox.length) $examBox.show();
+        } else {
+            if($videoBox.length) $videoBox.hide();
+            if($examBox.length) $examBox.hide();
         }
     }
 

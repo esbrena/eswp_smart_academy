@@ -436,6 +436,15 @@ add_action('add_meta_boxes', function() {
     );
 
     add_meta_box(
+        'cl_leccion_video',
+        'Vídeo de la lección',
+        'cl_render_leccion_video_metabox',
+        'lecciones-cie',
+        'normal',
+        'high'
+    );
+
+    add_meta_box(
         'cl_leccion_examen',
         'Examen (preguntas y respuestas)',
         'cl_render_leccion_examen_metabox',
@@ -529,8 +538,6 @@ function cl_get_leccion_min_time_seconds($leccion_id) {
 function cl_render_leccion_contenido_metabox($post) {
     wp_nonce_field('cl_leccion_contenido_save', 'cl_leccion_contenido_nonce');
     $tipo = cl_get_tipo_de_leccion($post->ID);
-    $video_attachment_id = (int) get_post_meta($post->ID, CL_META_LESSON_VIDEO_ATTACHMENT_ID, true);
-    $video_attachment_id = $video_attachment_id > 0 ? $video_attachment_id : 0;
     $min_seconds = cl_get_leccion_min_time_seconds($post->ID);
     $min_mmss = $min_seconds > 0 ? cl_seconds_to_human_mmss($min_seconds) : '';
     ?>
@@ -544,27 +551,34 @@ function cl_render_leccion_contenido_metabox($post) {
         <span class="description">Este campo controla qué bloques se muestran (vídeo/examen).</span>
     </p>
 
-    <div class="cl-leccion-field cl-leccion-video-field">
-        <label style="display:block; font-weight:600; margin-bottom:6px;">Vídeo</label>
+    <div class="cl-leccion-field cl-leccion-time-field" style="margin-top:10px;">
+        <label style="display:block; font-weight:600; margin-bottom:6px;">Tiempo mínimo (mm:ss)</label>
+        <input type="text" name="cl_tiempo_minimo_mmss" value="<?php echo esc_attr($min_mmss); ?>" placeholder="00:00" style="width:100%;" />
+        <span class="description">Opcional. Si está vacío o 00:00, no hay mínimo.</span>
+    </div>
+    <?php
+}
+
+function cl_render_leccion_video_metabox($post) {
+    wp_nonce_field('cl_leccion_video_save', 'cl_leccion_video_nonce');
+    $video_attachment_id = (int) get_post_meta($post->ID, CL_META_LESSON_VIDEO_ATTACHMENT_ID, true);
+    $video_attachment_id = $video_attachment_id > 0 ? $video_attachment_id : 0;
+    ?>
+    <div class="cl-leccion-video-metabox">
         <input type="hidden" name="cl_video_attachment_id" id="cl-video-attachment-id" value="<?php echo esc_attr($video_attachment_id); ?>" />
-        <div id="cl-video-preview" style="margin:0 0 8px;">
+        <div id="cl-video-preview" style="margin:0 0 10px;">
             <?php if ($video_attachment_id): ?>
                 <?php echo wp_get_attachment_link($video_attachment_id, '', false, false, 'Ver archivo'); ?>
+                <code style="margin-left:6px;">ID: <?php echo esc_html($video_attachment_id); ?></code>
             <?php else: ?>
                 <em>Sin archivo seleccionado</em>
             <?php endif; ?>
         </div>
         <p style="margin:0;">
-            <button type="button" class="button" id="cl-pick-video">Seleccionar vídeo</button>
+            <button type="button" class="button button-primary" id="cl-pick-video">Seleccionar vídeo</button>
             <button type="button" class="button" id="cl-clear-video">Quitar</button>
         </p>
-        <span class="description">Selecciona un archivo subido a WordPress (recomendado MP4).</span>
-    </div>
-
-    <div class="cl-leccion-field cl-leccion-time-field" style="margin-top:10px;">
-        <label style="display:block; font-weight:600; margin-bottom:6px;">Tiempo mínimo (mm:ss)</label>
-        <input type="text" name="cl_tiempo_minimo_mmss" value="<?php echo esc_attr($min_mmss); ?>" placeholder="00:00" style="width:100%;" />
-        <span class="description">Opcional. Si está vacío o 00:00, no hay mínimo.</span>
+        <p class="description" style="margin-top:10px;">Solo se mostrará si el tipo de lección es “Vídeo”.</p>
     </div>
     <?php
 }
@@ -619,12 +633,14 @@ add_action('save_post_lecciones-cie', function($post_id) {
         // Mantener compat: meta antigua solo normal/examen (para código legacy)
         update_post_meta($post_id, '_cl_leccion_tipo', $tipo === 'examen' ? 'examen' : 'normal');
 
-        $video_attachment_id = isset($_POST['cl_video_attachment_id']) ? absint($_POST['cl_video_attachment_id']) : 0;
-        update_post_meta($post_id, CL_META_LESSON_VIDEO_ATTACHMENT_ID, $video_attachment_id);
-
         $mmss = isset($_POST['cl_tiempo_minimo_mmss']) ? sanitize_text_field(wp_unslash($_POST['cl_tiempo_minimo_mmss'])) : '';
         $seconds = cl_parse_mmss_to_seconds($mmss);
         update_post_meta($post_id, CL_META_LESSON_MIN_SECONDS, max(0, (int)$seconds));
+    }
+
+    if (isset($_POST['cl_leccion_video_nonce']) && wp_verify_nonce($_POST['cl_leccion_video_nonce'], 'cl_leccion_video_save')) {
+        $video_attachment_id = isset($_POST['cl_video_attachment_id']) ? absint($_POST['cl_video_attachment_id']) : 0;
+        update_post_meta($post_id, CL_META_LESSON_VIDEO_ATTACHMENT_ID, $video_attachment_id);
     }
 
     if (isset($_POST['cl_leccion_examen_nonce']) && wp_verify_nonce($_POST['cl_leccion_examen_nonce'], 'cl_leccion_examen_save')) {
