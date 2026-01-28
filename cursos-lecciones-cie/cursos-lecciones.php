@@ -185,16 +185,39 @@ add_filter('wp_insert_post_data', function($data, $postarr) {
    FRONT: ocultar contenido del editor del curso
    (el curso se renderiza con el shortcode / UI)
 ===================================================== */
+function cl_disable_course_content_override($disabled = true) {
+    $GLOBALS['cl_disable_course_content_override'] = $disabled ? 1 : 0;
+}
+
+function cl_is_course_content_override_disabled() {
+    return !empty($GLOBALS['cl_disable_course_content_override']);
+}
+
 add_filter('the_content', function($content) {
+    // Evitar impacto en admin / ajax / llamadas internas
+    if (is_admin() || wp_doing_ajax()) return $content;
+    if (cl_is_course_content_override_disabled()) return $content;
     if (!is_singular('curso-cie')) return $content;
     if (!in_the_loop() || !is_main_query()) return $content;
+
+    global $post;
+    if (!$post || $post->post_type !== 'curso-cie') return $content;
+    if ((int) get_queried_object_id() !== (int) $post->ID) return $content;
+
+    // Guard anti-recursión (por si otro filtro llama a the_content dentro del render)
+    static $in = false;
+    if ($in) return $content;
 
     // Si ya han colocado el shortcode manualmente, respetarlo.
     if (is_string($content) && strpos($content, '[cl_leccion_curso') !== false) {
         return $content;
     }
-    return do_shortcode('[cl_leccion_curso]');
-}, 20);
+
+    $in = true;
+    $out = do_shortcode('[cl_leccion_curso]');
+    $in = false;
+    return $out;
+}, 1);
 
 /* =====================================================
    CPT: LECCIONES
@@ -1064,7 +1087,12 @@ add_shortcode('cl_leccion_curso', function(){
     }
 
     $leccion_tipo = cl_get_leccion_tipo($leccion_actual->ID);
+    // Importante: al filtrar contenido de lección/vídeo dentro del curso,
+    // desactivamos el override de contenido del curso para evitar recursión.
+    $prev_disable = cl_is_course_content_override_disabled();
+    cl_disable_course_content_override(true);
     $contenido = apply_filters('the_content', $leccion_actual->post_content);
+    cl_disable_course_content_override($prev_disable);
     $video = cl_render_leccion_video_frontend($leccion_actual->ID);
     // En exámenes no aplicamos tiempo mínimo de visualización (el gating es por examen).
     $tiempo_minimo_seg = ($leccion_tipo === 'examen') ? 0 : cl_get_leccion_min_time_seconds($leccion_actual->ID);
@@ -1127,7 +1155,12 @@ add_shortcode('cl_leccion_curso', function(){
 
             <?php if($video): ?>
                 <div class="cl-video">
-                    <?php echo apply_filters('the_content', $video); ?>
+                    <?php
+                        $prev_disable = cl_is_course_content_override_disabled();
+                        cl_disable_course_content_override(true);
+                        echo apply_filters('the_content', $video); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+                        cl_disable_course_content_override($prev_disable);
+                    ?>
                 </div>
             <?php endif; ?>
 
