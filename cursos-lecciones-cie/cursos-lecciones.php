@@ -431,7 +431,7 @@ add_action('add_meta_boxes', function() {
         'Contenido de lección',
         'cl_render_leccion_contenido_metabox',
         'lecciones-cie',
-        'side',
+        'normal',
         'high'
     );
 
