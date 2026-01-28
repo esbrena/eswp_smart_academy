@@ -15,6 +15,10 @@
     background: #f1f1f1;
 }
 
+.cl-metabox-hidden {
+    display: none !important;
+}
+
 table.widefat td { text-align:center; }
 button.button-secondary { background:#f44336; color:white; border:none; }
 button.button-secondary:hover { background:#d32f2f; }

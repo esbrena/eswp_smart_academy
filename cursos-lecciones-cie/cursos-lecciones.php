@@ -202,6 +202,19 @@ add_action('add_meta_boxes', function() {
     );
 });
 
+// Estado inicial de visibilidad de metaboxes en admin (por si JS falla)
+add_filter('postbox_classes_lecciones-cie_cl_leccion_video', function($classes, $post_id){
+    $tipo = cl_get_tipo_de_leccion($post_id);
+    if ($tipo !== 'video') $classes[] = 'cl-metabox-hidden';
+    return $classes;
+}, 10, 2);
+
+add_filter('postbox_classes_lecciones-cie_cl_leccion_examen', function($classes, $post_id){
+    $tipo = cl_get_tipo_de_leccion($post_id);
+    if ($tipo !== 'examen') $classes[] = 'cl-metabox-hidden';
+    return $classes;
+}, 10, 2);
+
 /* =====================================================
    OCULTAR SLUG
 ===================================================== */
@@ -296,13 +309,16 @@ function cl_render_curso_lecciones_metabox($post) {
     wp_nonce_field('cl_curso_lecciones_save', 'cl_curso_lecciones_nonce');
     $lecciones = cl_get_lecciones_ordenadas($post->ID);
     ?>
-    <div class="cl-curso-lecciones-metabox">
+    <div class="cl-curso-lecciones-metabox" data-curso-id="<?php echo esc_attr((int)$post->ID); ?>">
+        <?php if (empty($post->ID)): ?>
+            <p class="description"><strong>Primero guarda el curso</strong> (borrador) para poder añadir lecciones.</p>
+        <?php endif; ?>
         <p style="margin:0 0 8px;">
             <label for="cl-nueva-leccion-titulo" style="display:block; font-weight:600; margin-bottom:6px;">Añadir nueva lección</label>
-            <input type="text" id="cl-nueva-leccion-titulo" style="width:100%;" placeholder="Título de la lección" />
+            <input type="text" id="cl-nueva-leccion-titulo" style="width:100%;" placeholder="Título de la lección" <?php echo empty($post->ID) ? 'disabled' : ''; ?> />
         </p>
         <p style="margin:0 0 12px;">
-            <button type="button" class="button button-primary" id="cl-btn-crear-leccion">Añadir lección</button>
+            <button type="button" class="button button-primary" id="cl-btn-crear-leccion" <?php echo empty($post->ID) ? 'disabled' : ''; ?>>Añadir lección</button>
         </p>
 
         <p class="description" style="margin-top:0;">Arrastra para ordenar. Puedes cambiar el título en línea y abrir el editor en otra pestaña.</p>
@@ -778,7 +794,8 @@ add_action('wp_ajax_cl_crear_leccion', function() {
     check_ajax_referer('cl_ajax_nonce', 'nonce');
     $curso_id = isset($_POST['curso_id']) ? absint($_POST['curso_id']) : 0;
     $titulo = isset($_POST['titulo']) ? sanitize_text_field(wp_unslash($_POST['titulo'])) : '';
-    if (!$curso_id || $titulo === '') wp_send_json_error('Datos incompletos');
+    if (!$curso_id) wp_send_json_error('Primero guarda el curso (borrador) para poder añadir lecciones.');
+    if ($titulo === '') wp_send_json_error('Escribe un título');
     if (get_post_type($curso_id) !== 'curso-cie') wp_send_json_error('Curso inválido');
     if (!current_user_can('edit_post', $curso_id)) wp_send_json_error('Permisos insuficientes');
 

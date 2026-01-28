@@ -3,10 +3,11 @@ jQuery(document).ready(function($){
     // Crear lección AJAX
     $('#cl-btn-crear-leccion').on('click', function(){
         let titulo = $('#cl-nueva-leccion-titulo').val();
-        let curso_id = cl_ajax.post_id || $('#post_ID').val();
+        let curso_id = $('.cl-curso-lecciones-metabox').data('cursoId') || cl_ajax.post_id || $('#post_ID').val();
+        curso_id = parseInt(curso_id, 10) || 0;
 
-        if(!curso_id || String(curso_id) === '0'){
-            alert('Primero guarda el curso como borrador para poder añadir lecciones.');
+        if(curso_id <= 0){
+            alert('Primero guarda el curso (borrador) para poder añadir lecciones.');
             return;
         }
 

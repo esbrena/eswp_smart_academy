@@ -11,6 +11,13 @@ jQuery(function($){
         const $preview = $('#cl-video-preview');
         if(!$pick.length || !$id.length || !$preview.length) return;
 
+        if(!window.wp || !wp.media){
+            // Si esto pasa, el encolado de media no está funcionando y el resto del JS podría verse afectado.
+            // No hacemos throw para no romper condicionales; simplemente deshabilitamos el picker.
+            $pick.prop('disabled', true);
+            return;
+        }
+
         let frame = null;
         $pick.on('click', function(e){
             e.preventDefault();
@@ -68,8 +75,11 @@ jQuery(function($){
 
     function applyVisibility(){
         const tipo = getLessonType();
-        const $examBox = $('#cl_leccion_examen').closest('.postbox');
-        const $videoBox = $('#cl_leccion_video').closest('.postbox');
+        const $exam = $('#cl_leccion_examen');
+        const $video = $('#cl_leccion_video');
+        // En WP el contenedor del metabox es el propio #id con clase postbox
+        const $examBox = $exam.hasClass('postbox') ? $exam : $exam.closest('.postbox');
+        const $videoBox = $video.hasClass('postbox') ? $video : $video.closest('.postbox');
 
         // Normal: ocultar todo; Video: mostrar video; Examen: mostrar examen
         if(tipo === 'video'){
@@ -88,6 +98,7 @@ jQuery(function($){
     $(document).on('change', '.acf-field[data-name="tipo_de_leccion"] select, .acf-field[data-name="tipo_de_leccion"] input', applyVisibility);
     $(document).on('change', '.acf-field[data-name="tipo_leccion"] select, .acf-field[data-name="tipo_leccion"] input', applyVisibility);
     applyVisibility();
+    setTimeout(applyVisibility, 50);
 
     if(!$input.length || !$list.length) return;
 
