@@ -8,7 +8,7 @@ Author: Wembleys Studios
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define('CL_CIE_VERSION', '1.4');
+define('CL_CIE_VERSION', '1.5');
 
 /* =====================================================
    META KEYS / CONSTANTES
@@ -151,10 +151,50 @@ add_action( 'init', function() {
         'label' => 'Cursos',
         'public' => true,
         'menu_icon' => 'dashicons-welcome-learn-more',
-        'supports' => [ 'title', 'editor', 'thumbnail' ],
+        // El editor del curso NO se usa en front. Solo queremos un extracto (texto plano).
+        'supports' => [ 'title', 'excerpt', 'thumbnail' ],
         'show_in_rest' => false,
     ]);
 });
+
+/* =====================================================
+   CURSO: extracto texto plano (máx 400 caracteres)
+===================================================== */
+function cl_normalize_plain_text_excerpt($text, $max_chars = 400) {
+    $text = is_string($text) ? $text : '';
+    $text = wp_strip_all_tags($text, true);
+    $text = trim(preg_replace('/\s+/', ' ', $text));
+    $max_chars = max(0, (int)$max_chars);
+    if ($max_chars > 0) {
+        if (function_exists('mb_substr')) {
+            $text = mb_substr($text, 0, $max_chars);
+        } else {
+            $text = substr($text, 0, $max_chars);
+        }
+    }
+    return $text;
+}
+
+add_filter('wp_insert_post_data', function($data, $postarr) {
+    if (!is_array($data) || empty($data['post_type']) || $data['post_type'] !== 'curso-cie') return $data;
+    $data['post_excerpt'] = cl_normalize_plain_text_excerpt($data['post_excerpt'] ?? '', 400);
+    return $data;
+}, 10, 2);
+
+/* =====================================================
+   FRONT: ocultar contenido del editor del curso
+   (el curso se renderiza con el shortcode / UI)
+===================================================== */
+add_filter('the_content', function($content) {
+    if (!is_singular('curso-cie')) return $content;
+    if (!in_the_loop() || !is_main_query()) return $content;
+
+    // Si ya han colocado el shortcode manualmente, respetarlo.
+    if (is_string($content) && strpos($content, '[cl_leccion_curso') !== false) {
+        return $content;
+    }
+    return do_shortcode('[cl_leccion_curso]');
+}, 20);
 
 /* =====================================================
    CPT: LECCIONES
@@ -279,6 +319,30 @@ function cl_get_lecciones_ordenadas($curso_id){
 }
 
 /* =====================================================
+   ESTADO: CURSO INICIADO (user_meta)
+===================================================== */
+function cl_course_started_meta_key($curso_id) {
+    return 'cl_curso_' . absint($curso_id) . '_started';
+}
+
+function cl_has_user_started_course($user_id, $curso_id) {
+    $user_id = absint($user_id);
+    $curso_id = absint($curso_id);
+    if (!$user_id || !$curso_id) return false;
+    $v = get_user_meta($user_id, cl_course_started_meta_key($curso_id), true);
+    return (int)$v > 0;
+}
+
+function cl_mark_user_started_course($user_id, $curso_id) {
+    $user_id = absint($user_id);
+    $curso_id = absint($curso_id);
+    if (!$user_id || !$curso_id) return false;
+    if (cl_has_user_started_course($user_id, $curso_id)) return true;
+    update_user_meta($user_id, cl_course_started_meta_key($curso_id), time());
+    return true;
+}
+
+/* =====================================================
    ACCESO POR INSCRIPCIÓN (utils)
 ===================================================== */
 function cl_course_access_mode($curso_id) {
@@ -303,6 +367,26 @@ function cl_is_user_enrolled_in_course($user_id, $curso_id) {
     if (cl_course_access_mode($curso_id) === 'libre') return true;
     return in_array($user_id, cl_get_enrolled_user_ids($curso_id), true);
 }
+
+/* =====================================================
+   AJAX: COMENZAR CURSO (marca "curso iniciado")
+===================================================== */
+add_action('wp_ajax_cl_comenzar_curso', function() {
+    check_ajax_referer('cl_ajax_nonce', 'nonce');
+    if (!is_user_logged_in()) wp_send_json_error(['message' => 'Debes iniciar sesión.'], 401);
+
+    $user_id = get_current_user_id();
+    $curso_id = isset($_POST['curso_id']) ? absint($_POST['curso_id']) : 0;
+    if (!$curso_id || get_post_type($curso_id) !== 'curso-cie') {
+        wp_send_json_error(['message' => 'Curso inválido.'], 400);
+    }
+    if (!cl_is_user_enrolled_in_course($user_id, $curso_id)) {
+        wp_send_json_error(['message' => 'No tienes acceso a este curso.'], 403);
+    }
+
+    cl_mark_user_started_course($user_id, $curso_id);
+    wp_send_json_success(['started' => 1]);
+});
 
 /* =====================================================
    CURSO (admin): metaboxes
@@ -926,8 +1010,32 @@ add_shortcode('cl_leccion_curso', function(){
     if (!cl_is_user_enrolled_in_course($user_id, $curso_id)) {
         return '<div class="cl-no-access">No tienes acceso a este curso. Debes estar inscrito por un administrador.</div>';
     }
+
+    $excerpt = cl_normalize_plain_text_excerpt((string) get_post_field('post_excerpt', $curso_id), 400);
+    $excerpt_html = $excerpt !== '' ? wpautop(esc_html($excerpt)) : '';
+
+    // Gate: hasta que el usuario pulse "Comenzar curso", no mostramos lecciones/sidebar.
+    $started = cl_has_user_started_course($user_id, $curso_id);
+    if (!$started) {
+        ob_start();
+        ?>
+        <div class="cl-course-intro">
+            <?php if ($excerpt_html): ?>
+                <div class="cl-course-excerpt"><?php echo $excerpt_html; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?></div>
+            <?php endif; ?>
+            <button type="button" class="cl-btn cl-btn-start-course" id="cl-btn-start-course" data-curso="<?php echo esc_attr($curso_id); ?>">
+                Comenzar curso
+            </button>
+            <div class="cl-start-msg" aria-live="polite" style="margin-top:10px;"></div>
+        </div>
+        <?php
+        return ob_get_clean();
+    }
+
     $lecciones = cl_get_lecciones_ordenadas($curso_id);
-    if(empty($lecciones)) return 'No hay lecciones.';
+    if(empty($lecciones)) {
+        return ($excerpt_html ? '<div class="cl-course-excerpt">'.$excerpt_html.'</div>' : '') . '<div class="cl-no-access" style="border-left-color:#ffb900; background:#fffbea;">No hay lecciones todavía.</div>';
+    }
 
     $completadas = get_user_meta($user_id,"cl_curso_{$curso_id}_completadas",true);
     if(!is_array($completadas)) $completadas = [];
@@ -955,9 +1063,11 @@ add_shortcode('cl_leccion_curso', function(){
         }
     }
 
+    $leccion_tipo = cl_get_leccion_tipo($leccion_actual->ID);
     $contenido = apply_filters('the_content', $leccion_actual->post_content);
     $video = cl_render_leccion_video_frontend($leccion_actual->ID);
-    $tiempo_minimo_seg = cl_get_leccion_min_time_seconds($leccion_actual->ID);
+    // En exámenes no aplicamos tiempo mínimo de visualización (el gating es por examen).
+    $tiempo_minimo_seg = ($leccion_tipo === 'examen') ? 0 : cl_get_leccion_min_time_seconds($leccion_actual->ID);
 
     // Tiempo guardado previamente (para no resetear al volver a entrar)
     $tiempos_guardados = get_user_meta($user_id, "cl_curso_{$curso_id}_tiempos", true);
@@ -968,7 +1078,6 @@ add_shortcode('cl_leccion_curso', function(){
     $ids = wp_list_pluck($lecciones,'ID');
     $index = array_search($leccion_actual->ID, $ids);
 
-    $leccion_tipo = cl_get_leccion_tipo($leccion_actual->ID);
     $exam_ui = '';
     $exam_status = null;
     if ($leccion_tipo === 'examen') {
@@ -983,6 +1092,9 @@ add_shortcode('cl_leccion_curso', function(){
     }
 
     ob_start(); ?>
+    <?php if ($excerpt_html): ?>
+        <div class="cl-course-excerpt"><?php echo $excerpt_html; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?></div>
+    <?php endif; ?>
     <div class="cl-layout">
 
         <aside class="cl-sidebar">
@@ -1031,6 +1143,7 @@ add_shortcode('cl_leccion_curso', function(){
                 data-is-video="<?php echo $video ? '1' : '0'; ?>"
                 data-state="<?php echo esc_attr($leccion_completada); ?>"
                 data-exam-lock="<?php echo $disable_next_by_exam ? '1' : '0'; ?>"
+                data-lesson-type="<?php echo esc_attr($leccion_tipo); ?>"
             ></div>
 
             <?php if($leccion_tipo === 'examen'): ?>
@@ -1060,6 +1173,7 @@ add_shortcode('cl_leccion_curso', function(){
                         data-is-video="<?php echo $video ? '1' : '0'; ?>"
                         data-state="<?php echo esc_attr($leccion_completada); ?>"
                         data-exam-lock="<?php echo $disable_next_by_exam ? '1' : '0'; ?>"
+                        data-lesson-type="<?php echo esc_attr($leccion_tipo); ?>"
                         <?php echo ($should_disable_next_by_time || $disable_next_by_exam) ? 'disabled' : ''; ?>>
                         Siguiente lección →
                         </button>
@@ -1602,7 +1716,7 @@ function cl_render_progreso_usuarios(){
     foreach($cursos as $curso){
         echo '<h2>'.esc_html($curso->post_title).'</h2>';
         echo '<table class="widefat striped"><thead><tr>
-                <th>Usuario</th><th>Lecciones completadas</th><th>Tiempo por lección</th><th>Acciones</th>
+                <th>Usuario</th><th>Estado</th><th>Lecciones completadas</th><th>Tiempo por lección</th><th>Acciones</th>
               </tr></thead><tbody>';
 
         foreach($usuarios as $user){
@@ -1611,7 +1725,8 @@ function cl_render_progreso_usuarios(){
             if(!is_array($completadas)) $completadas=[];
             if(!is_array($tiempos)) $tiempos=[];
 
-            if(empty($completadas)) continue;
+            $started = cl_has_user_started_course($user->ID, $curso->ID);
+            if(!$started && empty($completadas)) continue;
 
             $lecciones = cl_get_lecciones_ordenadas($curso->ID);
             $lecciones_text=[];
@@ -1621,8 +1736,18 @@ function cl_render_progreso_usuarios(){
                 $lecciones_text[] = "$estado ($tiempo) ".$l->post_title;
             }
 
+            $estado_curso_html = '';
+            if(!$started){
+                $estado_curso_html = '<span class="state-no-init">No iniciado</span>';
+            } elseif(count($completadas) === 0){
+                $estado_curso_html = '<span class="state-progress">Curso iniciado</span>';
+            } else {
+                $estado_curso_html = '<span class="state-progress">En progreso</span>';
+            }
+
             echo '<tr>';
             echo '<td>'.esc_html($user->display_name).' ('.esc_html($user->user_login).')</td>';
+            echo '<td>'.$estado_curso_html.'</td>';
             echo '<td>'.count($completadas).'/'.count($lecciones).'</td>';
             echo '<td>'.implode('<br>',$lecciones_text).'</td>';
             echo '<td>
@@ -1647,6 +1772,7 @@ function cl_render_progreso_usuarios(){
         delete_user_meta($uid,"cl_curso_{$cid}_actual");
         delete_user_meta($uid,"cl_curso_{$cid}_tiempos");
         delete_user_meta($uid,"cl_curso_{$cid}_aprobado");
+        delete_user_meta($uid, cl_course_started_meta_key($cid));
 
         // Borrar histórico
         global $wpdb;
@@ -1918,11 +2044,14 @@ add_shortcode('cl_estado_curso', function($atts) {
 
     $completadas_count = count($completadas);
     $porcentaje        = round(($completadas_count / $total) * 100);
+    $started = cl_has_user_started_course($user_id, $curso_id);
 
     // Determinar estado del curso
     $aprobado = (int) get_user_meta($user_id, "cl_curso_{$curso_id}_aprobado", true);
-    if ($completadas_count === 0) {
+    if (!$started) {
         $estado = "<span class='state-no-init'>No iniciado</span>";
+    } elseif ($completadas_count === 0) {
+        $estado = "<span class='state-progress'>Curso iniciado</span>";
     } elseif ($completadas_count < $total) {
         $estado = "<span class='state-progress'>En progreso ({$porcentaje}%)</span>";
     } else {
