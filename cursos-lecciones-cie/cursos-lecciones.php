@@ -18,6 +18,7 @@ define('CL_META_ENROLLED_USERS', '_cl_enrolled_users'); // array user IDs
 define('CL_META_COURSE_AUTOEVAL', '_cl_course_autoeval'); // 0/1
 define('CL_META_COURSE_EXAM_NOTIFY_USER', '_cl_exam_notify_user_id'); // int user id
 define('CL_META_EXAM_TIME_SECONDS', '_cl_exam_time_seconds'); // int seconds
+define('CL_META_EXAM_MAX_GRADE', '_cl_exam_max_grade'); // float (default 10)
 
 // Lecciones (reemplazo de ACF "Contenido de lección")
 define('CL_META_LESSON_TYPE', '_cl_tipo_de_leccion'); // normal | video | examen
@@ -141,6 +142,16 @@ function cl_parse_mmss_to_seconds($value) {
     }
 
     return 0;
+}
+
+/* =====================================================
+   EXAM: NOTA MÁXIMA
+===================================================== */
+function cl_get_exam_max_grade($leccion_id) {
+    $v = get_post_meta($leccion_id, CL_META_EXAM_MAX_GRADE, true);
+    $max = is_numeric($v) ? (float) $v : 10.0;
+    if (!is_finite($max) || $max <= 0) $max = 10.0;
+    return $max;
 }
 
 /* =====================================================
@@ -692,6 +703,7 @@ function cl_render_leccion_examen_metabox($post) {
     if (!isset($exam['questions']) || !is_array($exam['questions'])) $exam['questions'] = [];
     $exam_time = (int) get_post_meta($post->ID, CL_META_EXAM_TIME_SECONDS, true);
     $exam_time_minutes = $exam_time > 0 ? (int) ceil($exam_time / 60) : 0;
+    $exam_max_grade = cl_get_exam_max_grade($post->ID);
 
     wp_nonce_field('cl_leccion_examen_save', 'cl_leccion_examen_nonce');
     ?>
@@ -700,6 +712,12 @@ function cl_render_leccion_examen_metabox($post) {
             <label style="display:block; font-weight:600; margin-bottom:6px;">Tiempo máximo del examen (minutos)</label>
             <input type="number" min="0" step="1" name="cl_exam_time_minutes" value="<?php echo esc_attr($exam_time_minutes); ?>" style="width:120px;" />
             <span class="description">0 = sin límite.</span>
+        </p>
+
+        <p>
+            <label style="display:block; font-weight:600; margin-bottom:6px;">Nota máxima del examen</label>
+            <input type="number" min="0.1" step="0.1" name="cl_exam_max_grade" value="<?php echo esc_attr($exam_max_grade); ?>" style="width:120px;" />
+            <span class="description">Por defecto: 10. La nota se calcula como (puntos_obtenidos / puntos_totales) × nota_máxima.</span>
         </p>
 
         <p class="description">
@@ -750,6 +768,12 @@ add_action('save_post_lecciones-cie', function($post_id) {
         $minutes = isset($_POST['cl_exam_time_minutes']) ? absint($_POST['cl_exam_time_minutes']) : 0;
         $seconds = $minutes > 0 ? ($minutes * 60) : 0;
         update_post_meta($post_id, CL_META_EXAM_TIME_SECONDS, $seconds);
+
+        // Guardar nota máxima (siempre)
+        $max_grade_raw = isset($_POST['cl_exam_max_grade']) ? sanitize_text_field(wp_unslash($_POST['cl_exam_max_grade'])) : '10';
+        $max_grade = is_numeric($max_grade_raw) ? (float) $max_grade_raw : 10.0;
+        if (!is_finite($max_grade) || $max_grade <= 0) $max_grade = 10.0;
+        update_post_meta($post_id, CL_META_EXAM_MAX_GRADE, $max_grade);
 
         // Solo guardar definición si la lección es de tipo examen
         if (cl_get_leccion_tipo($post_id) === 'examen') {
@@ -1274,14 +1298,15 @@ function cl_render_exam_frontend($curso_id, $leccion_id, $attempt) {
     }
 
     if ($attempt && $status === 'approved') {
-        $score = get_post_meta($attempt->ID, '_cl_final_score', true);
-        $score = is_numeric($score) ? round((float)$score, 2) : '';
-        $auto = get_post_meta($attempt->ID, '_cl_auto_score', true);
-        $auto = is_numeric($auto) ? round((float)$auto, 2) : '';
+        $max_grade = cl_get_exam_max_grade($leccion_id);
+        $final_grade = get_post_meta($attempt->ID, '_cl_final_grade', true);
+        $final_grade = is_numeric($final_grade) ? round((float)$final_grade, 2) : '';
+        $auto_grade = get_post_meta($attempt->ID, '_cl_auto_grade', true);
+        $auto_grade = is_numeric($auto_grade) ? round((float)$auto_grade, 2) : '';
 
         $html = '<div class="cl-exam-state cl-exam-approved"><strong>Examen aprobado</strong>.';
-        if ($score !== '') $html .= ' Nota: <strong>' . esc_html($score) . '%</strong>.';
-        if ($auto !== '') $html .= ' (Auto: ' . esc_html($auto) . '%)';
+        if ($final_grade !== '') $html .= ' Nota profesor: <strong>' . esc_html($final_grade) . ' / ' . esc_html($max_grade) . '</strong>.';
+        if ($auto_grade !== '') $html .= ' (Auto: ' . esc_html($auto_grade) . ' / ' . esc_html($max_grade) . ')';
         $html .= '</div>';
         $html .= cl_render_exam_results_readonly($leccion_id, $attempt);
         return $html;
@@ -1393,6 +1418,10 @@ function cl_render_exam_results_readonly($leccion_id, $attempt) {
     $answers = get_post_meta($attempt->ID, '_cl_answers', true);
     if (!is_array($answers)) $answers = [];
 
+    $max_grade = cl_get_exam_max_grade($leccion_id);
+    $final_grade = get_post_meta($attempt->ID, '_cl_final_grade', true);
+    if (!is_numeric($final_grade)) $final_grade = get_post_meta($attempt->ID, '_cl_auto_grade', true);
+
     $final_breakdown = get_post_meta($attempt->ID, '_cl_final_breakdown', true);
     if (!is_array($final_breakdown)) {
         $final_breakdown = get_post_meta($attempt->ID, '_cl_auto_breakdown', true);
@@ -1406,6 +1435,9 @@ function cl_render_exam_results_readonly($leccion_id, $attempt) {
     ?>
     <div class="cl-exam-results">
         <h3>Resultados</h3>
+        <?php if (is_numeric($final_grade)): ?>
+            <p class="cl-exam-grade-total"><strong>Nota:</strong> <?php echo esc_html(round((float)$final_grade, 2)); ?> / <?php echo esc_html($max_grade); ?></p>
+        <?php endif; ?>
         <?php if (is_numeric($final_points) && is_numeric($total_points) && (float)$total_points > 0): ?>
             <p class="cl-exam-points-total"><strong>Puntos:</strong> <?php echo esc_html(round((float)$final_points, 2)); ?> / <?php echo esc_html(round((float)$total_points, 2)); ?></p>
         <?php endif; ?>
@@ -1560,8 +1592,10 @@ add_action('wp_ajax_cl_submit_exam', function() {
 
     $raw_answers = isset($_POST['answers']) ? $_POST['answers'] : [];
     $answers = cl_normalize_exam_answers($raw_answers, $def);
-    $auto = cl_calculate_exam_auto($answers, $def); // ['score'=>0-100, ...]
-    $auto_score = (float) ($auto['score'] ?? 0); // 0-100
+    $max_grade = cl_get_exam_max_grade($leccion_id);
+    $auto = cl_calculate_exam_auto($answers, $def, $max_grade); // ['percent'=>0-100,'grade'=>0-max, ...]
+    $auto_percent = (float) ($auto['percent'] ?? 0);
+    $auto_grade = (float) ($auto['grade'] ?? 0);
 
     $attempt_id = wp_insert_post([
         'post_type' => 'cl-exam-attempt',
@@ -1577,7 +1611,9 @@ add_action('wp_ajax_cl_submit_exam', function() {
     update_post_meta($attempt_id, '_cl_lesson_id', $leccion_id);
     update_post_meta($attempt_id, '_cl_user_id', $user_id);
     update_post_meta($attempt_id, '_cl_answers', $answers);
-    update_post_meta($attempt_id, '_cl_auto_score', $auto_score);
+    update_post_meta($attempt_id, '_cl_max_grade', (float) $max_grade);
+    update_post_meta($attempt_id, '_cl_auto_score', $auto_percent); // compat (%)
+    update_post_meta($attempt_id, '_cl_auto_grade', $auto_grade);
     update_post_meta($attempt_id, '_cl_auto_points', (float) ($auto['earned_points'] ?? 0));
     update_post_meta($attempt_id, '_cl_total_points', (float) ($auto['total_points'] ?? 0));
     update_post_meta($attempt_id, '_cl_auto_breakdown', $auto['breakdown'] ?? []);
@@ -1588,7 +1624,8 @@ add_action('wp_ajax_cl_submit_exam', function() {
     if (!empty($duration)) update_post_meta($attempt_id, '_cl_duration_seconds', (int)$duration);
 
     if ($autoeval) {
-        update_post_meta($attempt_id, '_cl_final_score', $auto_score);
+        update_post_meta($attempt_id, '_cl_final_score', $auto_percent); // compat (%)
+        update_post_meta($attempt_id, '_cl_final_grade', $auto_grade);
         update_post_meta($attempt_id, '_cl_final_points', (float) ($auto['earned_points'] ?? 0));
         update_post_meta($attempt_id, '_cl_final_breakdown', $auto['breakdown'] ?? []);
         cl_mark_course_approved($user_id, $curso_id, $leccion_id);
@@ -1596,7 +1633,7 @@ add_action('wp_ajax_cl_submit_exam', function() {
 
     cl_notify_admin_exam_submitted($attempt_id);
 
-    wp_send_json_success(['attempt_id' => $attempt_id, 'auto_score' => $auto_score]);
+    wp_send_json_success(['attempt_id' => $attempt_id, 'auto_grade' => $auto_grade, 'max_grade' => $max_grade]);
 });
 
 function cl_normalize_exam_answers($raw, $def) {
@@ -1633,10 +1670,12 @@ function cl_normalize_exam_answers($raw, $def) {
     return $answers;
 }
 
-function cl_calculate_exam_auto($answers, $def) {
+function cl_calculate_exam_auto($answers, $def, $max_grade = 10.0) {
     $breakdown = [];
     $total_points = 0.0;
     $earned_points = 0.0;
+    $max_grade = is_numeric($max_grade) ? (float) $max_grade : 10.0;
+    if (!is_finite($max_grade) || $max_grade <= 0) $max_grade = 10.0;
 
     foreach ($def['questions'] as $qi => $q) {
         $type = (isset($q['type']) && in_array($q['type'], ['single', 'multi', 'text'], true)) ? $q['type'] : 'single';
@@ -1683,9 +1722,11 @@ function cl_calculate_exam_auto($answers, $def) {
         ];
     }
 
-    $score = ($total_points > 0) ? round(($earned_points / $total_points) * 100, 2) : 0.0;
+    $percent = ($total_points > 0) ? round(($earned_points / $total_points) * 100, 2) : 0.0;
+    $grade = ($total_points > 0) ? round(($earned_points / $total_points) * $max_grade, 2) : 0.0;
     return [
-        'score' => $score,
+        'percent' => $percent,
+        'grade' => $grade,
         'earned_points' => round($earned_points, 4),
         'total_points' => round($total_points, 4),
         'breakdown' => $breakdown,
@@ -1694,8 +1735,8 @@ function cl_calculate_exam_auto($answers, $def) {
 
 function cl_calculate_exam_score($answers, $def) {
     // Backward compat: devolver % (0-100)
-    $auto = cl_calculate_exam_auto($answers, $def);
-    return (float) ($auto['score'] ?? 0);
+    $auto = cl_calculate_exam_auto($answers, $def, 10.0);
+    return (float) ($auto['percent'] ?? 0);
 }
 
 function cl_notify_admin_exam_submitted($attempt_id) {
@@ -1980,7 +2021,7 @@ function cl_render_examenes_admin() {
     ]);
 
     echo '<table class="widefat striped"><thead><tr>';
-    echo '<th>Alumno</th><th>Curso</th><th>Lección</th><th>Fecha</th><th>Auto</th><th>Estado</th><th>Acción</th>';
+    echo '<th>Alumno</th><th>Curso</th><th>Lección</th><th>Fecha</th><th>Nota auto</th><th>Estado</th><th>Acción</th>';
     echo '</tr></thead><tbody>';
 
     if (empty($attempts)) {
@@ -1991,7 +2032,9 @@ function cl_render_examenes_admin() {
             $leccion_id = (int)get_post_meta($a->ID, '_cl_lesson_id', true);
             $user_id = (int)get_post_meta($a->ID, '_cl_user_id', true);
             $submitted = (string)get_post_meta($a->ID, '_cl_submitted_at', true);
-            $auto = get_post_meta($a->ID, '_cl_auto_score', true);
+            $auto_grade = get_post_meta($a->ID, '_cl_auto_grade', true);
+            $max_grade = get_post_meta($a->ID, '_cl_max_grade', true);
+            if (!is_numeric($max_grade) || (float)$max_grade <= 0) $max_grade = 10;
             $st = (string)get_post_meta($a->ID, '_cl_status', true);
 
             $user = get_user_by('id', $user_id);
@@ -2004,7 +2047,7 @@ function cl_render_examenes_admin() {
             echo '<td>' . esc_html($curso ? $curso->post_title : $curso_id) . '</td>';
             echo '<td>' . esc_html($leccion ? $leccion->post_title : $leccion_id) . '</td>';
             echo '<td>' . esc_html($submitted ?: get_the_date('Y-m-d H:i', $a)) . '</td>';
-            echo '<td>' . esc_html(is_numeric($auto) ? (round((float)$auto, 2) . '%') : '-') . '</td>';
+            echo '<td>' . esc_html(is_numeric($auto_grade) ? (round((float)$auto_grade, 2) . ' / ' . round((float)$max_grade, 2)) : '-') . '</td>';
             echo '<td>' . esc_html($st) . '</td>';
             echo '<td><a class="button button-primary" href="' . esc_url($url) . '">Revisar</a></td>';
             echo '</tr>';
@@ -2025,8 +2068,8 @@ function cl_render_examen_admin_detail($attempt_id) {
     $leccion_id = (int)get_post_meta($attempt_id, '_cl_lesson_id', true);
     $user_id = (int)get_post_meta($attempt_id, '_cl_user_id', true);
     $status = (string)get_post_meta($attempt_id, '_cl_status', true);
-    $auto = get_post_meta($attempt_id, '_cl_auto_score', true);
-    $final = get_post_meta($attempt_id, '_cl_final_score', true);
+    $auto_grade = get_post_meta($attempt_id, '_cl_auto_grade', true);
+    $final_grade = get_post_meta($attempt_id, '_cl_final_grade', true);
     $answers = get_post_meta($attempt_id, '_cl_answers', true);
     if (!is_array($answers)) $answers = [];
 
@@ -2042,7 +2085,7 @@ function cl_render_examen_admin_detail($attempt_id) {
     // Breakdown auto (para precargar puntuación por pregunta)
     $auto_breakdown = get_post_meta($attempt_id, '_cl_auto_breakdown', true);
     if (!is_array($auto_breakdown)) {
-        $auto_calc = cl_calculate_exam_auto($answers, $def);
+        $auto_calc = cl_calculate_exam_auto($answers, $def, cl_get_exam_max_grade($leccion_id));
         $auto_breakdown = is_array($auto_calc['breakdown'] ?? null) ? $auto_calc['breakdown'] : [];
     }
 
@@ -2077,9 +2120,12 @@ function cl_render_examen_admin_detail($attempt_id) {
                 $final_breakdown[$qi]['earned'] = (float)$earned;
             }
 
-            $final_score = ($total_points > 0) ? round(($final_points / $total_points) * 100, 2) : 0.0;
+            $max_grade = cl_get_exam_max_grade($leccion_id);
+            $final_score = ($total_points > 0) ? round(($final_points / $total_points) * 100, 2) : 0.0; // compat (%)
+            $final_grade_calc = ($total_points > 0) ? round(($final_points / $total_points) * $max_grade, 2) : 0.0;
             update_post_meta($attempt_id, '_cl_status', 'approved');
             update_post_meta($attempt_id, '_cl_final_score', $final_score);
+            update_post_meta($attempt_id, '_cl_final_grade', $final_grade_calc);
             update_post_meta($attempt_id, '_cl_final_points', round($final_points, 4));
             update_post_meta($attempt_id, '_cl_total_points', round($total_points, 4));
             update_post_meta($attempt_id, '_cl_final_breakdown', $final_breakdown);
@@ -2114,8 +2160,9 @@ function cl_render_examen_admin_detail($attempt_id) {
     echo '<p><strong>Curso:</strong> ' . esc_html($curso ? $curso->post_title : $curso_id) . '</p>';
     echo '<p><strong>Lección:</strong> ' . esc_html($leccion ? $leccion->post_title : $leccion_id) . '</p>';
     echo '<p><strong>Estado:</strong> ' . esc_html($status) . '</p>';
-    echo '<p><strong>Auto-score:</strong> ' . esc_html(is_numeric($auto) ? (round((float)$auto, 2) . '%') : '-') . '</p>';
-    echo '<p><strong>Nota final:</strong> ' . esc_html(is_numeric($final) ? (round((float)$final, 2) . '%') : '-') . '</p>';
+    $max_grade = cl_get_exam_max_grade($leccion_id);
+    echo '<p><strong>Nota autogenerada:</strong> ' . esc_html(is_numeric($auto_grade) ? (round((float)$auto_grade, 2) . ' / ' . $max_grade) : '-') . '</p>';
+    echo '<p><strong>Nota profesor:</strong> ' . esc_html(is_numeric($final_grade) ? (round((float)$final_grade, 2) . ' / ' . $max_grade) : '-') . '</p>';
 
     echo '<h3>Respuestas del alumno</h3>';
     echo '<div class="cl-exam-admin-review">';

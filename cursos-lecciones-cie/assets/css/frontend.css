@@ -316,6 +316,11 @@
     font-size: 14px;
 }
 
+.cl-exam-grade-total {
+    margin: 8px 0;
+    font-size: 14px;
+}
+
 .cl-exam-text-answer {
     margin-top: 10px;
     padding: 10px 12px;
