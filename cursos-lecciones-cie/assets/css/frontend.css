@@ -195,6 +195,70 @@
     margin-top: 14px;
 }
 
+.cl-exam-progress {
+    margin: 10px 0 14px;
+    padding: 10px 12px;
+    border: 1px solid #e6e6e6;
+    background: #fff;
+    border-radius: 6px;
+}
+
+.cl-exam-nav {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin: 10px 0 0;
+}
+
+.cl-exam-review {
+    margin-top: 12px;
+    padding: 12px;
+    border: 1px solid #e6e6e6;
+    background: #fff;
+    border-radius: 6px;
+}
+
+.cl-exam-review-item {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: center;
+    padding: 10px 10px;
+    border: 1px solid #efefef;
+    border-radius: 6px;
+    margin: 8px 0;
+}
+
+.cl-exam-review-item.unanswered {
+    border-left: 4px solid #cc1818;
+}
+
+.cl-exam-review-item.answered {
+    border-left: 4px solid #46b450;
+}
+
+.cl-exam-review-meta {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+.cl-exam-review-badge {
+    font-size: 12px;
+    padding: 4px 8px;
+    border-radius: 999px;
+    background: #f3f3f3;
+}
+
+.cl-exam-review-item.unanswered .cl-exam-review-badge {
+    background: #fff5f5;
+}
+
+.cl-exam-review-item.answered .cl-exam-review-badge {
+    background: #f1fff3;
+}
+
 .cl-exam-q {
     margin: 0 0 18px;
     padding: 12px;

@@ -1292,6 +1292,7 @@ function cl_render_exam_frontend($curso_id, $leccion_id, $attempt) {
     }
 
     $time_limit = (int) get_post_meta($leccion_id, CL_META_EXAM_TIME_SECONDS, true);
+    $q_total = is_array($def['questions']) ? count($def['questions']) : 0;
 
     ob_start();
     ?>
@@ -1317,7 +1318,12 @@ function cl_render_exam_frontend($curso_id, $leccion_id, $attempt) {
             <button type="button" class="cl-btn cl-exam-finish" style="margin:0 0 12px;">Finalizar examen</button>
         <?php endif; ?>
 
+        <div class="cl-exam-progress" data-total="<?php echo esc_attr($q_total); ?>">
+            <strong>Pregunta <span class="cl-exam-step-cur">1</span> de <span class="cl-exam-step-total"><?php echo esc_html($q_total); ?></span></strong>
+        </div>
+
         <?php foreach ($def['questions'] as $qi => $q): ?>
+            <div class="cl-exam-step" data-step="<?php echo esc_attr($qi); ?>" style="<?php echo $qi === 0 ? '' : 'display:none;'; ?>">
             <fieldset class="cl-exam-q">
                 <legend>
                     <span class="cl-exam-qn"><?php echo esc_html($qi + 1); ?>.</span>
@@ -1345,9 +1351,24 @@ function cl_render_exam_frontend($curso_id, $leccion_id, $attempt) {
                     <?php endforeach; ?>
                 </div>
             </fieldset>
+            </div>
         <?php endforeach; ?>
 
-        <button type="submit" class="cl-btn cl-exam-submit">Enviar examen</button>
+        <div class="cl-exam-nav">
+            <button type="button" class="cl-btn cl-exam-prev">Anterior</button>
+            <button type="button" class="cl-btn cl-exam-next">Continuar</button>
+            <button type="button" class="cl-btn cl-exam-review-btn">Revisar respuestas</button>
+        </div>
+
+        <div class="cl-exam-review" style="display:none;">
+            <h3 style="margin-top:0;">Revisión</h3>
+            <div class="cl-exam-review-list"></div>
+            <div class="cl-exam-review-actions" style="margin-top:12px;">
+                <button type="button" class="cl-btn cl-exam-back-to-questions">Volver a preguntas</button>
+                <button type="submit" class="cl-btn cl-exam-submit">Enviar examen</button>
+            </div>
+        </div>
+
         <div class="cl-exam-msg" aria-live="polite"></div>
     </form>
     <?php
@@ -1417,32 +1438,6 @@ add_action('wp_ajax_cl_start_exam', function() {
         wp_send_json_error(['message' => 'Esta lección no es un examen.'], 400);
     }
 
-    // Validar sesión / tiempo (si aplica)
-    $time_limit = (int) get_post_meta($leccion_id, CL_META_EXAM_TIME_SECONDS, true);
-    $duration = 0;
-    $started_at = 0;
-    if ($time_limit > 0) {
-        $token = isset($_POST['exam_session_token']) ? sanitize_text_field(wp_unslash($_POST['exam_session_token'])) : '';
-        if ($token === '') wp_send_json_error(['message' => 'Debes iniciar el examen antes de enviarlo.'], 400);
-        $session = get_transient('cl_exam_session_' . $token);
-        if (!is_array($session)
-            || (int)($session['user_id'] ?? 0) !== (int)$user_id
-            || (int)($session['curso_id'] ?? 0) !== (int)$curso_id
-            || (int)($session['leccion_id'] ?? 0) !== (int)$leccion_id
-        ) {
-            wp_send_json_error(['message' => 'Sesión de examen inválida o caducada.'], 400);
-        }
-        $started_at = (int)($session['started_at'] ?? 0);
-        $duration = $started_at > 0 ? max(0, time() - $started_at) : 0;
-        // Pequeña gracia por latencia
-        if ($duration > ($time_limit + 10)) {
-            delete_transient('cl_exam_session_' . $token);
-            wp_send_json_error(['message' => 'El tiempo del examen ha finalizado.'], 409);
-        }
-        // Consumir sesión (un único envío)
-        delete_transient('cl_exam_session_' . $token);
-    }
-
     $latest = cl_get_latest_exam_attempt($user_id, $curso_id, $leccion_id);
     if (!cl_can_user_take_exam($latest)) {
         wp_send_json_error(['message' => 'Ya has realizado este examen.'], 409);
@@ -1481,6 +1476,32 @@ add_action('wp_ajax_cl_submit_exam', function() {
     }
     if (cl_get_leccion_tipo($leccion_id) !== 'examen') {
         wp_send_json_error(['message' => 'Esta lección no es un examen.'], 400);
+    }
+
+    // Validar sesión/tiempo si hay límite
+    $time_limit = (int) get_post_meta($leccion_id, CL_META_EXAM_TIME_SECONDS, true);
+    $duration = 0;
+    $started_at = 0;
+    if ($time_limit > 0) {
+        $token = isset($_POST['exam_session_token']) ? sanitize_text_field(wp_unslash($_POST['exam_session_token'])) : '';
+        if ($token === '') wp_send_json_error(['message' => 'Debes iniciar el examen antes de enviarlo.'], 400);
+        $session = get_transient('cl_exam_session_' . $token);
+        if (!is_array($session)
+            || (int)($session['user_id'] ?? 0) !== (int)$user_id
+            || (int)($session['curso_id'] ?? 0) !== (int)$curso_id
+            || (int)($session['leccion_id'] ?? 0) !== (int)$leccion_id
+        ) {
+            wp_send_json_error(['message' => 'Sesión de examen inválida o caducada.'], 400);
+        }
+        $started_at = (int)($session['started_at'] ?? 0);
+        $duration = $started_at > 0 ? max(0, time() - $started_at) : 0;
+        // Pequeña gracia por latencia
+        if ($duration > ($time_limit + 10)) {
+            delete_transient('cl_exam_session_' . $token);
+            wp_send_json_error(['message' => 'El tiempo del examen ha finalizado.'], 409);
+        }
+        // Consumir sesión (un único envío)
+        delete_transient('cl_exam_session_' . $token);
     }
 
     $latest = cl_get_latest_exam_attempt($user_id, $curso_id, $leccion_id);
