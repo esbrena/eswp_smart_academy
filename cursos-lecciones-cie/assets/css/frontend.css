@@ -279,10 +279,7 @@
     margin: 10px 0;
 }
 
-.cl-exam-opt {
-    display: block;
-    margin: 8px 0;
-}
+/* (mantenido arriba) */
 
 .cl-exam-msg {
     margin-top: 10px;
@@ -295,7 +292,47 @@
 .cl-exam-res-opts {
     margin: 8px 0 0;
 }
+
+.cl-exam-res-opts,
+.cl-exam-review-list {
+    list-style: none;
+    padding-left: 0;
+}
+
+.cl-exam-res-opt {
+    list-style: none;
+    position: relative;
+    margin: 8px 0;
+    padding: 10px 12px 10px 40px;
+    border: 1px solid #e6e6e6;
+    border-radius: 10px;
+    background: #fff;
+}
+
+.cl-exam-res-opt::before {
+    content: "•";
+    position: absolute;
+    left: 14px;
+    top: 10px;
+    width: 18px;
+    height: 18px;
+    line-height: 18px;
+    text-align: center;
+    border-radius: 999px;
+    color: #6b7280;
+    background: #f3f4f6;
+    font-weight: 700;
+    font-size: 12px;
+}
+
+.cl-exam-res-opt.is-selected {
+    border-color: #9ca3af;
+    box-shadow: 0 0 0 2px rgba(156, 163, 175, 0.15);
+}
+
 .cl-exam-res-opt.is-correct {
+    border-color: #46b450;
+    background: #f1fff3;
     color: #1e7e34;
 }
 .cl-exam-res-opt.is-selected {
@@ -303,11 +340,64 @@
 }
 
 .cl-exam-res-opt.is-wrong {
+    border-color: #cc1818;
+    background: #fff5f5;
     color: #cc1818;
 }
 
 .cl-exam-res-opt.is-missed {
-    text-decoration: underline;
+    border-style: dashed;
+    text-decoration: none;
+}
+
+.cl-exam-res-opt.is-correct::before {
+    content: "✓";
+    background: #e6f4ea;
+    color: #1e7e34;
+}
+
+.cl-exam-res-opt.is-wrong::before {
+    content: "✕";
+    background: #ffe5e5;
+    color: #cc1818;
+}
+
+.cl-exam-res-opt.is-missed::before {
+    opacity: 0.65;
+}
+
+/* Opciones durante el examen */
+.cl-exam-opt {
+    display: block;
+    margin: 8px 0;
+    position: relative;
+}
+
+.cl-exam-opt input[type="radio"],
+.cl-exam-opt input[type="checkbox"] {
+    position: absolute;
+    left: 14px;
+    top: 14px;
+    margin: 0;
+}
+
+.cl-exam-opt span {
+    display: block;
+    padding: 10px 12px 10px 40px;
+    border: 1px solid #e6e6e6;
+    border-radius: 10px;
+    background: #fff;
+    transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease;
+}
+
+.cl-exam-opt:hover span {
+    border-color: #9ca3af;
+}
+
+.cl-exam-opt input:checked + span {
+    border-color: #007cba;
+    background: #f5fbff;
+    box-shadow: 0 0 0 2px rgba(0, 124, 186, 0.15);
 }
 
 .cl-exam-qpoints,
