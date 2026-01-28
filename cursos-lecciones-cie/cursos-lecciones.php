@@ -151,8 +151,8 @@ add_action( 'init', function() {
         'label' => 'Cursos',
         'public' => true,
         'menu_icon' => 'dashicons-welcome-learn-more',
-        // El editor del curso NO se usa en front. Solo queremos un extracto (texto plano).
-        'supports' => [ 'title', 'excerpt', 'thumbnail' ],
+        // Soportar Elementor/constructor (editor) + extracto (texto plano).
+        'supports' => [ 'title', 'editor', 'excerpt', 'thumbnail' ],
         'show_in_rest' => false,
     ]);
 });
@@ -182,8 +182,7 @@ add_filter('wp_insert_post_data', function($data, $postarr) {
 }, 10, 2);
 
 /* =====================================================
-   FRONT: ocultar contenido del editor del curso
-   (el curso se renderiza con el shortcode / UI)
+   FRONT: helpers anti-recursión (por si se usan en filtros internos)
 ===================================================== */
 function cl_disable_course_content_override($disabled = true) {
     $GLOBALS['cl_disable_course_content_override'] = $disabled ? 1 : 0;
@@ -193,31 +192,8 @@ function cl_is_course_content_override_disabled() {
     return !empty($GLOBALS['cl_disable_course_content_override']);
 }
 
-add_filter('the_content', function($content) {
-    // Evitar impacto en admin / ajax / llamadas internas
-    if (is_admin() || wp_doing_ajax()) return $content;
-    if (cl_is_course_content_override_disabled()) return $content;
-    if (!is_singular('curso-cie')) return $content;
-    if (!in_the_loop() || !is_main_query()) return $content;
-
-    global $post;
-    if (!$post || $post->post_type !== 'curso-cie') return $content;
-    if ((int) get_queried_object_id() !== (int) $post->ID) return $content;
-
-    // Guard anti-recursión (por si otro filtro llama a the_content dentro del render)
-    static $in = false;
-    if ($in) return $content;
-
-    // Si ya han colocado el shortcode manualmente, respetarlo.
-    if (is_string($content) && strpos($content, '[cl_leccion_curso') !== false) {
-        return $content;
-    }
-
-    $in = true;
-    $out = do_shortcode('[cl_leccion_curso]');
-    $in = false;
-    return $out;
-}, 1);
+// Nota: ya no forzamos el contenido del curso en `the_content`.
+// El usuario puede insertar `[cl_boton_comenzar_curso]` y `[cl_leccion_curso]` desde Elementor.
 
 /* =====================================================
    CPT: LECCIONES
@@ -1050,31 +1026,14 @@ add_shortcode('cl_leccion_curso', function(){
         return '<div class="cl-no-access">No tienes acceso a este curso. Debes estar inscrito por un administrador.</div>';
     }
 
-    $excerpt = cl_normalize_plain_text_excerpt((string) get_post_field('post_excerpt', $curso_id), 400);
-    $excerpt_html = $excerpt !== '' ? wpautop(esc_html($excerpt)) : '';
-
-    // Gate: hasta que el usuario pulse "Comenzar curso", no mostramos lecciones/sidebar.
+    // Gate: el contenido del curso solo se muestra si el usuario ha iniciado el curso.
     $started = cl_has_user_started_course($user_id, $curso_id);
     if (!$started) {
-        ob_start();
-        ?>
-        <div class="cl-course-intro">
-            <?php if ($excerpt_html): ?>
-                <div class="cl-course-excerpt"><?php echo $excerpt_html; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?></div>
-            <?php endif; ?>
-            <button type="button" class="cl-btn cl-btn-start-course" id="cl-btn-start-course" data-curso="<?php echo esc_attr($curso_id); ?>">
-                Comenzar curso
-            </button>
-            <div class="cl-start-msg" aria-live="polite" style="margin-top:10px;"></div>
-        </div>
-        <?php
-        return ob_get_clean();
+        return '';
     }
 
     $lecciones = cl_get_lecciones_ordenadas($curso_id);
-    if(empty($lecciones)) {
-        return ($excerpt_html ? '<div class="cl-course-excerpt">'.$excerpt_html.'</div>' : '') . '<div class="cl-no-access" style="border-left-color:#ffb900; background:#fffbea;">No hay lecciones todavía.</div>';
-    }
+    if(empty($lecciones)) return '<div class="cl-no-access" style="border-left-color:#ffb900; background:#fffbea;">No hay lecciones todavía.</div>';
 
     $completadas = get_user_meta($user_id,"cl_curso_{$curso_id}_completadas",true);
     if(!is_array($completadas)) $completadas = [];
@@ -1136,9 +1095,6 @@ add_shortcode('cl_leccion_curso', function(){
     }
 
     ob_start(); ?>
-    <?php if ($excerpt_html): ?>
-        <div class="cl-course-excerpt"><?php echo $excerpt_html; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?></div>
-    <?php endif; ?>
     <div class="cl-layout">
 
         <aside class="cl-sidebar">
@@ -1235,6 +1191,34 @@ add_shortcode('cl_leccion_curso', function(){
 
         </main>
     </div>
+    <?php
+    return ob_get_clean();
+});
+
+/* =====================================================
+   SHORTCODE: BOTÓN "COMENZAR CURSO"
+   - Solo en página singular de curso
+   - No se muestra en loops/listados
+   - No se muestra si el curso ya está iniciado
+===================================================== */
+add_shortcode('cl_boton_comenzar_curso', function() {
+    if (!is_user_logged_in()) return '';
+    if (!is_singular('curso-cie')) return '';
+    if (is_admin() || wp_doing_ajax()) return '';
+
+    $curso_id = (int) get_queried_object_id();
+    if (!$curso_id || get_post_type($curso_id) !== 'curso-cie') return '';
+
+    $user_id = get_current_user_id();
+    if (!cl_is_user_enrolled_in_course($user_id, $curso_id)) return '';
+    if (cl_has_user_started_course($user_id, $curso_id)) return '';
+
+    ob_start();
+    ?>
+    <button type="button" class="cl-btn cl-btn-start-course" id="cl-btn-start-course" data-curso="<?php echo esc_attr($curso_id); ?>">
+        Comenzar curso
+    </button>
+    <div class="cl-start-msg" aria-live="polite" style="margin-top:10px;"></div>
     <?php
     return ob_get_clean();
 });
