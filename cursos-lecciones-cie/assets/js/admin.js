@@ -3,7 +3,13 @@ jQuery(document).ready(function($){
     // Crear lección AJAX
     $('#cl-btn-crear-leccion').on('click', function(){
         let titulo = $('#cl-nueva-leccion-titulo').val();
-        let curso_id = cl_ajax.post_id || $('#post_ID').val();
+        let curso_id = $('.cl-curso-lecciones-metabox').data('cursoId') || cl_ajax.post_id || $('#post_ID').val();
+        curso_id = parseInt(curso_id, 10) || 0;
+
+        if(curso_id <= 0){
+            alert('Primero guarda el curso (borrador) para poder añadir lecciones.');
+            return;
+        }
 
         if(titulo.length === 0) return alert('Escribe un título');
 
@@ -19,7 +25,12 @@ jQuery(document).ready(function($){
                     return $(this).text().trim() === 'No hay lecciones todavía.';
                 }).remove();
 
-                let html = '<li data-id="'+res.data.ID+'"><strong>'+res.data.title+'</strong> <a href="'+res.data.edit_link+'" target="_blank">Editar</a></li>';
+                let html = ''
+                    + '<li data-id="'+res.data.ID+'">'
+                    +   '<input type="text" class="cl-leccion-title" value="'+$('<div>').text(res.data.title).html()+'" style="width:55%; max-width:420px;" />'
+                    +   '<a href="'+res.data.edit_link+'" target="_blank" style="margin-left:10px;">Editar</a>'
+                    +   '<button type="button" class="button-link-delete cl-btn-eliminar" data-id="'+res.data.ID+'" style="margin-left:10px;">Eliminar</button>'
+                    + '</li>';
                 $('#cl-lecciones-list').append(html);
                 $('#cl-nueva-leccion-titulo').val('');
             } else {
@@ -64,5 +75,42 @@ jQuery(document).ready(function($){
             }
         });
     });
+
+    // Actualizar título en línea
+    $('#cl-lecciones-list')
+        .on('focus', '.cl-leccion-title', function(){
+            $(this).data('original', $(this).val());
+        })
+        .on('blur', '.cl-leccion-title', function(){
+            const $input = $(this);
+            const original = String($input.data('original') || '');
+            const nuevo = String($input.val() || '').trim();
+            const leccion_id = $input.closest('li').data('id');
+
+            if(!leccion_id) return;
+            if(nuevo.length === 0){
+                // Revertir si queda vacío
+                $input.val(original);
+                return;
+            }
+            if(nuevo === original) return;
+
+            $.post(cl_ajax.ajax_url, {
+                action: 'cl_actualizar_titulo_leccion',
+                leccion_id: leccion_id,
+                titulo: nuevo,
+                nonce: cl_ajax.nonce
+            }, function(res){
+                if(res && res.success){
+                    $input.data('original', nuevo);
+                } else {
+                    alert('Error al actualizar el título');
+                    $input.val(original);
+                }
+            }).fail(function(){
+                alert('Error al actualizar el título');
+                $input.val(original);
+            });
+        });
 
 });

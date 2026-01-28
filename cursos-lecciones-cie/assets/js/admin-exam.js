@@ -3,6 +3,103 @@ jQuery(function($){
     const $list = $('#cl-exam-questions');
     const $addQ = $('#cl-exam-add-question');
 
+    // Selector de vídeo (WordPress Media Library) en metabox "Contenido de lección"
+    (function(){
+        const $pick = $('#cl-pick-video');
+        const $clear = $('#cl-clear-video');
+        const $id = $('#cl-video-attachment-id');
+        const $preview = $('#cl-video-preview');
+        if(!$pick.length || !$id.length || !$preview.length) return;
+
+        if(!window.wp || !wp.media){
+            // Si esto pasa, el encolado de media no está funcionando y el resto del JS podría verse afectado.
+            // No hacemos throw para no romper condicionales; simplemente deshabilitamos el picker.
+            $pick.prop('disabled', true);
+            return;
+        }
+
+        let frame = null;
+        $pick.on('click', function(e){
+            e.preventDefault();
+            if(frame){
+                frame.open();
+                return;
+            }
+            frame = wp.media({
+                title: 'Selecciona un vídeo',
+                button: { text: 'Usar este vídeo' },
+                library: { type: 'video' },
+                multiple: false
+            });
+            frame.on('select', function(){
+                const attachment = frame.state().get('selection').first().toJSON();
+                $id.val(attachment.id);
+                const url = attachment.url || '';
+                const filename = attachment.filename || ('Adjunto ' + attachment.id);
+                const safeUrl = $('<div>').text(url).html();
+                const safeName = $('<div>').text(filename).html();
+                $preview.html('<a href="'+safeUrl+'" target="_blank" rel="noreferrer">Ver archivo</a> <code style="margin-left:6px;">ID: '+attachment.id+'</code> <span style="margin-left:6px;">'+safeName+'</span>');
+            });
+            frame.open();
+        });
+
+        $clear.on('click', function(e){
+            e.preventDefault();
+            $id.val('0');
+            $preview.html('<em>Sin archivo seleccionado</em>');
+        });
+    })();
+
+    // Mostrar/ocultar el bloque de examen según tipo de lección (ACF o metabox propio)
+    function getLessonType(){
+        // Preferir el plugin: select #cl-tipo-de-leccion
+        const vPlugin = String($('#cl-tipo-de-leccion').val() || '').toLowerCase().trim();
+        if(vPlugin) return vPlugin;
+
+        // Backward: ACF (nuevo) data-name="tipo_de_leccion"
+        const $acfNew = $('.acf-field[data-name="tipo_de_leccion"]');
+        if($acfNew.length){
+            const v = String($acfNew.find('select').val() || $acfNew.find('input:checked').val() || '').toLowerCase().trim();
+            if(v) return v;
+        }
+
+        // Backward: ACF (antiguo) data-name="tipo_leccion"
+        const $acfOld = $('.acf-field[data-name="tipo_leccion"]');
+        if($acfOld.length){
+            const v = String($acfOld.find('select').val() || $acfOld.find('input:checked').val() || '').toLowerCase().trim();
+            if(v) return v;
+        }
+
+        return 'normal';
+    }
+
+    function applyVisibility(){
+        const tipo = getLessonType();
+        const $exam = $('#cl_leccion_examen');
+        const $video = $('#cl_leccion_video');
+        // En WP el contenedor del metabox es el propio #id con clase postbox
+        const $examBox = $exam.hasClass('postbox') ? $exam : $exam.closest('.postbox');
+        const $videoBox = $video.hasClass('postbox') ? $video : $video.closest('.postbox');
+
+        // Normal: ocultar todo; Video: mostrar video; Examen: mostrar examen
+        if(tipo === 'video'){
+            if($videoBox.length) $videoBox.removeClass('cl-metabox-hidden');
+            if($examBox.length) $examBox.addClass('cl-metabox-hidden');
+        } else if(tipo === 'examen' || tipo === 'exam'){
+            if($videoBox.length) $videoBox.addClass('cl-metabox-hidden');
+            if($examBox.length) $examBox.removeClass('cl-metabox-hidden');
+        } else {
+            if($videoBox.length) $videoBox.addClass('cl-metabox-hidden');
+            if($examBox.length) $examBox.addClass('cl-metabox-hidden');
+        }
+    }
+
+    $(document).on('change', '#cl-tipo-de-leccion', applyVisibility);
+    $(document).on('change', '.acf-field[data-name="tipo_de_leccion"] select, .acf-field[data-name="tipo_de_leccion"] input', applyVisibility);
+    $(document).on('change', '.acf-field[data-name="tipo_leccion"] select, .acf-field[data-name="tipo_leccion"] input', applyVisibility);
+    applyVisibility();
+    setTimeout(applyVisibility, 50);
+
     if(!$input.length || !$list.length) return;
 
     function safeParse(json){
