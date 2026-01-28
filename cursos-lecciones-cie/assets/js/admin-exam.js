@@ -83,14 +83,14 @@ jQuery(function($){
 
         // Normal: ocultar todo; Video: mostrar video; Examen: mostrar examen
         if(tipo === 'video'){
-            if($videoBox.length) $videoBox.show();
-            if($examBox.length) $examBox.hide();
+            if($videoBox.length) $videoBox.removeClass('cl-metabox-hidden');
+            if($examBox.length) $examBox.addClass('cl-metabox-hidden');
         } else if(tipo === 'examen' || tipo === 'exam'){
-            if($videoBox.length) $videoBox.hide();
-            if($examBox.length) $examBox.show();
+            if($videoBox.length) $videoBox.addClass('cl-metabox-hidden');
+            if($examBox.length) $examBox.removeClass('cl-metabox-hidden');
         } else {
-            if($videoBox.length) $videoBox.hide();
-            if($examBox.length) $examBox.hide();
+            if($videoBox.length) $videoBox.addClass('cl-metabox-hidden');
+            if($examBox.length) $examBox.addClass('cl-metabox-hidden');
         }
     }
 

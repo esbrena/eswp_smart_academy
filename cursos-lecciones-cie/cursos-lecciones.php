@@ -203,17 +203,19 @@ add_action('add_meta_boxes', function() {
 });
 
 // Estado inicial de visibilidad de metaboxes en admin (por si JS falla)
-add_filter('postbox_classes_lecciones-cie_cl_leccion_video', function($classes, $post_id){
-    $tipo = cl_get_tipo_de_leccion($post_id);
+add_filter('postbox_classes_lecciones-cie_cl_leccion_video', function($classes){
+    $post_id = isset($_GET['post']) ? absint($_GET['post']) : 0;
+    $tipo = $post_id ? cl_get_tipo_de_leccion($post_id) : 'normal';
     if ($tipo !== 'video') $classes[] = 'cl-metabox-hidden';
     return $classes;
-}, 10, 2);
+});
 
-add_filter('postbox_classes_lecciones-cie_cl_leccion_examen', function($classes, $post_id){
-    $tipo = cl_get_tipo_de_leccion($post_id);
+add_filter('postbox_classes_lecciones-cie_cl_leccion_examen', function($classes){
+    $post_id = isset($_GET['post']) ? absint($_GET['post']) : 0;
+    $tipo = $post_id ? cl_get_tipo_de_leccion($post_id) : 'normal';
     if ($tipo !== 'examen') $classes[] = 'cl-metabox-hidden';
     return $classes;
-}, 10, 2);
+});
 
 /* =====================================================
    OCULTAR SLUG
@@ -308,17 +310,18 @@ function cl_is_user_enrolled_in_course($user_id, $curso_id) {
 function cl_render_curso_lecciones_metabox($post) {
     wp_nonce_field('cl_curso_lecciones_save', 'cl_curso_lecciones_nonce');
     $lecciones = cl_get_lecciones_ordenadas($post->ID);
+    $needs_save_first = empty($post->ID) || (isset($post->post_status) && $post->post_status === 'auto-draft');
     ?>
     <div class="cl-curso-lecciones-metabox" data-curso-id="<?php echo esc_attr((int)$post->ID); ?>">
-        <?php if (empty($post->ID)): ?>
+        <?php if ($needs_save_first): ?>
             <p class="description"><strong>Primero guarda el curso</strong> (borrador) para poder añadir lecciones.</p>
         <?php endif; ?>
         <p style="margin:0 0 8px;">
             <label for="cl-nueva-leccion-titulo" style="display:block; font-weight:600; margin-bottom:6px;">Añadir nueva lección</label>
-            <input type="text" id="cl-nueva-leccion-titulo" style="width:100%;" placeholder="Título de la lección" <?php echo empty($post->ID) ? 'disabled' : ''; ?> />
+            <input type="text" id="cl-nueva-leccion-titulo" style="width:100%;" placeholder="Título de la lección" <?php echo $needs_save_first ? 'disabled' : ''; ?> />
         </p>
         <p style="margin:0 0 12px;">
-            <button type="button" class="button button-primary" id="cl-btn-crear-leccion" <?php echo empty($post->ID) ? 'disabled' : ''; ?>>Añadir lección</button>
+            <button type="button" class="button button-primary" id="cl-btn-crear-leccion" <?php echo $needs_save_first ? 'disabled' : ''; ?>>Añadir lección</button>
         </p>
 
         <p class="description" style="margin-top:0;">Arrastra para ordenar. Puedes cambiar el título en línea y abrir el editor en otra pestaña.</p>
