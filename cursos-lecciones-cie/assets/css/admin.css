@@ -60,17 +60,19 @@ button.button-secondary:hover { background:#d32f2f; }
     padding-left: 0;
 }
 
-.cl-exam-admin-opt {
+.cl-exam-admin-opts .cl-exam-admin-opt {
     list-style: none;
     position: relative;
+    display: block;
     margin: 8px 0;
     padding: 10px 12px 10px 40px;
     border: 1px solid #e6e6e6;
     border-radius: 10px;
     background: #fff;
+    box-sizing: border-box;
 }
 
-.cl-exam-admin-opt::before {
+.cl-exam-admin-opts .cl-exam-admin-opt::before {
     content: "•";
     position: absolute;
     left: 14px;
@@ -86,42 +88,42 @@ button.button-secondary:hover { background:#d32f2f; }
     font-size: 12px;
 }
 
-.cl-exam-admin-opt.is-correct {
+.cl-exam-admin-opts .cl-exam-admin-opt.is-correct {
     color: #1e7e34;
     font-weight: 600;
     border-color: #46b450;
     background: #f1fff3;
 }
 
-.cl-exam-admin-opt.is-selected {
+.cl-exam-admin-opts .cl-exam-admin-opt.is-selected {
     border-color: #9ca3af;
     box-shadow: 0 0 0 2px rgba(156, 163, 175, 0.15);
 }
 
-.cl-exam-admin-opt.is-wrong {
+.cl-exam-admin-opts .cl-exam-admin-opt.is-wrong {
     color: #cc1818;
     border-color: #cc1818;
     background: #fff5f5;
 }
 
-.cl-exam-admin-opt.is-missed {
+.cl-exam-admin-opts .cl-exam-admin-opt.is-missed {
     border-style: dashed;
     text-decoration: none;
 }
 
-.cl-exam-admin-opt.is-correct::before {
+.cl-exam-admin-opts .cl-exam-admin-opt.is-correct::before {
     content: "✓";
     background: #e6f4ea;
     color: #1e7e34;
 }
 
-.cl-exam-admin-opt.is-wrong::before {
+.cl-exam-admin-opts .cl-exam-admin-opt.is-wrong::before {
     content: "✕";
     background: #ffe5e5;
     color: #cc1818;
 }
 
-.cl-exam-admin-opt.is-missed::before {
+.cl-exam-admin-opts .cl-exam-admin-opt.is-missed::before {
     opacity: 0.65;
 }
 

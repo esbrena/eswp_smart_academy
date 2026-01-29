@@ -154,7 +154,7 @@ jQuery(function($){
 
                     <p style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
                         <label style="font-weight:600;">Puntos</label>
-                        <input type="number" class="cl-exam-qpoints" min="0" step="0.25" style="width:120px;" />
+                        <input type="number" class="cl-exam-qpoints" min="0.25" step="0.25" placeholder="1" style="width:120px;" />
                         <span class="description">Puntos máximos de la pregunta (para cálculo automático).</span>
                     </p>
 
@@ -184,7 +184,8 @@ jQuery(function($){
 
             $q.find('.cl-exam-qtext').val(q.text || '');
             $q.find('.cl-exam-qtype').val(qtype);
-            $q.find('.cl-exam-qpoints').val((typeof q.points !== 'undefined') ? q.points : 1);
+            const pts = parseFloat((typeof q.points !== 'undefined') ? q.points : 1);
+            $q.find('.cl-exam-qpoints').val((isNaN(pts) || pts <= 0) ? 1 : pts);
 
             // Imagen
             const imgId = parseInt(q.image_id || 0, 10) || 0;
@@ -231,7 +232,7 @@ jQuery(function($){
             const qObj = {
                 text: $q.find('.cl-exam-qtext').val() || '',
                 type,
-                points: isNaN(points) ? 1 : Math.max(0, points),
+                points: (isNaN(points) || points <= 0) ? 1 : points,
                 image_id: parseInt($q.data('image_id') || 0, 10) || 0,
                 options: []
             };

@@ -8,7 +8,7 @@ Author: Wembleys Studios
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define('CL_CIE_VERSION', '1.5');
+define('CL_CIE_VERSION', '1.6');
 
 /* =====================================================
    META KEYS / CONSTANTES
@@ -797,8 +797,10 @@ function cl_normalize_exam_definition($decoded) {
         $text = isset($q['text']) ? wp_kses_post($q['text']) : '';
         $type = isset($q['type']) && in_array($q['type'], ['single', 'multi', 'text'], true) ? $q['type'] : 'single';
         $image_id = isset($q['image_id']) ? absint($q['image_id']) : 0;
-        $points = isset($q['points']) ? (float) $q['points'] : 1.0;
-        if (!is_finite($points) || $points < 0) $points = 1.0;
+        // Si no se define (o viene vacío/0), usar 1 por defecto.
+        $raw_points = isset($q['points']) ? $q['points'] : null;
+        $points = ($raw_points === null || $raw_points === '') ? 1.0 : (float) $raw_points;
+        if (!is_finite($points) || $points <= 0) $points = 1.0;
 
         if ($text === '') continue;
 
@@ -1764,6 +1766,12 @@ function cl_notify_admin_exam_submitted($attempt_id) {
     }
     if ($to === '') return;
 
+    // TEMP (solo para pruebas): redirigir envíos a Gmail
+    // TODO: eliminar en producción.
+    if (strtolower(trim($to)) === 'esther.garcia@wembleystudios.com') {
+        $to = 'esther.g.brena@gmail.com';
+    }
+
     $subject = sprintf('Nuevo examen realizado: %s', $curso ? $curso->post_title : ('Curso ' . $curso_id));
     $link = admin_url('admin.php?page=cl_examenes&attempt=' . absint($attempt_id));
     $message = "Un estudiante ha realizado un examen.\n\n";
@@ -2351,9 +2359,15 @@ function cl_create_enrollment_request_token($user_id, $course_ids) {
     return $token;
 }
 
-add_shortcode('cl_form_inscripcion', function() {
+add_shortcode('cl_form_inscripcion', function($atts) {
     if (!is_user_logged_in()) return 'Debes iniciar sesión.';
     $user_id = get_current_user_id();
+
+    $atts = shortcode_atts([
+        'to' => '',
+    ], (array)$atts, 'cl_form_inscripcion');
+    $custom_to = sanitize_email((string)($atts['to'] ?? ''));
+    $notify_to = (is_email($custom_to)) ? $custom_to : (string) get_option('admin_email');
 
     $cursos = get_posts([
         'post_type' => 'curso-cie',
@@ -2401,8 +2415,7 @@ add_shortcode('cl_form_inscripcion', function() {
             $msg .= "\nRevisar solicitud (aprobar/revocar por curso):\n";
             $msg .= $review_link . "\n";
 
-            $admin_email = (string) get_option('admin_email');
-            if ($admin_email) wp_mail($admin_email, $subject, $msg);
+            if ($notify_to) wp_mail($notify_to, $subject, $msg);
 
             $notice = '<div class="cl-no-access" style="border-left-color:#46b450; background:#f1fff3;">Solicitud enviada. Un administrador revisará tu inscripción.</div>';
         }
