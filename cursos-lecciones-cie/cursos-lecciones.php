@@ -20,6 +20,9 @@ define('CL_META_COURSE_EXAM_NOTIFY_USER', '_cl_exam_notify_user_id'); // int use
 define('CL_META_EXAM_TIME_SECONDS', '_cl_exam_time_seconds'); // int seconds
 define('CL_META_EXAM_MAX_GRADE', '_cl_exam_max_grade'); // float (default 10)
 
+// User meta: cursos solicitados (pendiente de aprobación de inscripción)
+define('CL_USER_META_PENDING_ENROLLMENTS', '_cl_pending_enrollments'); // array course IDs
+
 // Lecciones (reemplazo de ACF "Contenido de lección")
 define('CL_META_LESSON_TYPE', '_cl_tipo_de_leccion'); // normal | video | examen
 define('CL_META_LESSON_VIDEO', '_cl_video_tracking'); // string (embed/html/shortcode)
@@ -376,6 +379,40 @@ function cl_is_user_enrolled_in_course($user_id, $curso_id) {
     if (user_can($user_id, 'manage_options')) return true;
     if (cl_course_access_mode($curso_id) === 'libre') return true;
     return in_array($user_id, cl_get_enrolled_user_ids($curso_id), true);
+}
+
+function cl_get_user_pending_enrollments($user_id) {
+    $user_id = absint($user_id);
+    if (!$user_id) return [];
+    $ids = get_user_meta($user_id, CL_USER_META_PENDING_ENROLLMENTS, true);
+    if (!is_array($ids)) $ids = [];
+    $ids = array_values(array_unique(array_map('absint', $ids)));
+    return array_values(array_filter($ids));
+}
+
+function cl_add_user_pending_enrollments($user_id, $course_ids) {
+    $user_id = absint($user_id);
+    if (!$user_id) return;
+    $current = cl_get_user_pending_enrollments($user_id);
+    $add = array_values(array_unique(array_filter(array_map('absint', (array)$course_ids))));
+    $merged = array_values(array_unique(array_merge($current, $add)));
+    update_user_meta($user_id, CL_USER_META_PENDING_ENROLLMENTS, $merged);
+}
+
+function cl_remove_user_pending_enrollments($user_id, $course_ids) {
+    $user_id = absint($user_id);
+    if (!$user_id) return;
+    $current = cl_get_user_pending_enrollments($user_id);
+    $remove = array_values(array_unique(array_filter(array_map('absint', (array)$course_ids))));
+    if (empty($remove)) return;
+    $new = array_values(array_diff($current, $remove));
+    update_user_meta($user_id, CL_USER_META_PENDING_ENROLLMENTS, $new);
+}
+
+function cl_is_course_pending_for_user($user_id, $curso_id) {
+    $curso_id = absint($curso_id);
+    if (!$curso_id) return false;
+    return in_array($curso_id, cl_get_user_pending_enrollments($user_id), true);
 }
 
 /* =====================================================
@@ -1144,6 +1181,11 @@ add_shortcode('cl_leccion_curso', function(){
 
                 $should_disable_next_by_time = (!$leccion_completada && $tiempo_minimo_seg > 0 && $tiempo_guardado_actual < $tiempo_minimo_seg);
             ?>
+
+            <div class="cl-course-header">
+                <a class="cl-course-close" href="<?php echo esc_url(home_url('/')); ?>" aria-label="Cerrar curso">×</a>
+            </div>
+
             <div class="cl-barra-tiempo">
                 <div class="cl-barra-llenado" style="width: <?php echo esc_attr($porcentaje_barra); ?>%"></div>
             </div>
@@ -1303,12 +1345,9 @@ function cl_render_exam_frontend($curso_id, $leccion_id, $attempt) {
         $max_grade = cl_get_exam_max_grade($leccion_id);
         $final_grade = get_post_meta($attempt->ID, '_cl_final_grade', true);
         $final_grade = is_numeric($final_grade) ? round((float)$final_grade, 2) : '';
-        $auto_grade = get_post_meta($attempt->ID, '_cl_auto_grade', true);
-        $auto_grade = is_numeric($auto_grade) ? round((float)$auto_grade, 2) : '';
 
         $html = '<div class="cl-exam-state cl-exam-approved"><strong>Examen aprobado</strong>.';
-        if ($final_grade !== '') $html .= ' Nota profesor: <strong>' . esc_html($final_grade) . ' / ' . esc_html($max_grade) . '</strong>.';
-        if ($auto_grade !== '') $html .= ' (Auto: ' . esc_html($auto_grade) . ' / ' . esc_html($max_grade) . ')';
+        if ($final_grade !== '') $html .= ' Nota: <strong>' . esc_html($final_grade) . ' / ' . esc_html($max_grade) . '</strong>.';
         $html .= '</div>';
         $html .= cl_render_exam_results_readonly($leccion_id, $attempt);
         return $html;
@@ -2029,7 +2068,7 @@ function cl_render_examenes_admin() {
     ]);
 
     echo '<table class="widefat striped"><thead><tr>';
-    echo '<th>Alumno</th><th>Curso</th><th>Lección</th><th>Fecha</th><th>Nota auto</th><th>Estado</th><th>Acción</th>';
+    echo '<th>Alumno</th><th>Curso</th><th>Lección</th><th>Fecha</th><th>Nota</th><th>Estado</th><th>Acción</th>';
     echo '</tr></thead><tbody>';
 
     if (empty($attempts)) {
@@ -2040,7 +2079,9 @@ function cl_render_examenes_admin() {
             $leccion_id = (int)get_post_meta($a->ID, '_cl_lesson_id', true);
             $user_id = (int)get_post_meta($a->ID, '_cl_user_id', true);
             $submitted = (string)get_post_meta($a->ID, '_cl_submitted_at', true);
+            $final_grade = get_post_meta($a->ID, '_cl_final_grade', true);
             $auto_grade = get_post_meta($a->ID, '_cl_auto_grade', true);
+            $grade = is_numeric($final_grade) ? $final_grade : $auto_grade;
             $max_grade = get_post_meta($a->ID, '_cl_max_grade', true);
             if (!is_numeric($max_grade) || (float)$max_grade <= 0) $max_grade = 10;
             $st = (string)get_post_meta($a->ID, '_cl_status', true);
@@ -2055,7 +2096,7 @@ function cl_render_examenes_admin() {
             echo '<td>' . esc_html($curso ? $curso->post_title : $curso_id) . '</td>';
             echo '<td>' . esc_html($leccion ? $leccion->post_title : $leccion_id) . '</td>';
             echo '<td>' . esc_html($submitted ?: get_the_date('Y-m-d H:i', $a)) . '</td>';
-            echo '<td>' . esc_html(is_numeric($auto_grade) ? (round((float)$auto_grade, 2) . ' / ' . round((float)$max_grade, 2)) : '-') . '</td>';
+            echo '<td>' . esc_html(is_numeric($grade) ? (round((float)$grade, 2) . ' / ' . round((float)$max_grade, 2)) : '-') . '</td>';
             echo '<td>' . esc_html($st) . '</td>';
             echo '<td><a class="button button-primary" href="' . esc_url($url) . '">Revisar</a></td>';
             echo '</tr>';
@@ -2169,8 +2210,8 @@ function cl_render_examen_admin_detail($attempt_id) {
     echo '<p><strong>Lección:</strong> ' . esc_html($leccion ? $leccion->post_title : $leccion_id) . '</p>';
     echo '<p><strong>Estado:</strong> ' . esc_html($status) . '</p>';
     $max_grade = cl_get_exam_max_grade($leccion_id);
-    echo '<p><strong>Nota autogenerada:</strong> ' . esc_html(is_numeric($auto_grade) ? (round((float)$auto_grade, 2) . ' / ' . $max_grade) : '-') . '</p>';
-    echo '<p><strong>Nota profesor:</strong> ' . esc_html(is_numeric($final_grade) ? (round((float)$final_grade, 2) . ' / ' . $max_grade) : '-') . '</p>';
+    $grade = is_numeric($final_grade) ? $final_grade : $auto_grade;
+    echo '<p><strong>Nota:</strong> ' . esc_html(is_numeric($grade) ? (round((float)$grade, 2) . ' / ' . $max_grade) : '-') . '</p>';
 
     echo '<h3>Respuestas del alumno</h3>';
     echo '<div class="cl-exam-admin-review">';
@@ -2320,6 +2361,10 @@ add_shortcode('cl_estado_curso', function($atts) {
         return 'Curso sin lecciones.';
     }
 
+    // Estado inscripción/pending (solo para cursos por inscripción)
+    $access_mode = cl_course_access_mode($curso_id);
+    $is_pending_insc = ($access_mode === 'inscripcion') ? cl_is_course_pending_for_user($user_id, $curso_id) : false;
+
     // Obtener lecciones completadas por el usuario
     $completadas = get_user_meta($user_id, "cl_curso_{$curso_id}_completadas", true);
     if (!is_array($completadas)) {
@@ -2332,14 +2377,21 @@ add_shortcode('cl_estado_curso', function($atts) {
 
     // Determinar estado del curso
     $aprobado = (int) get_user_meta($user_id, "cl_curso_{$curso_id}_aprobado", true);
-    if (!$started) {
-        $estado = "<span class='state-no-init'>No iniciado</span>";
+    if ($is_pending_insc) {
+        $estado = "<span class='state-progress'>Pendiente de aprobación</span>";
+    } elseif (!$started) {
+        // Si es por inscripción y ya tiene acceso, lo consideramos "Inscrito"
+        if ($access_mode === 'inscripcion' && cl_is_user_enrolled_in_course($user_id, $curso_id)) {
+            $estado = "<span class='state-progress'>Inscrito</span>";
+        } else {
+            $estado = "<span class='state-no-init'>No iniciado</span>";
+        }
     } elseif ($completadas_count === 0) {
         $estado = "<span class='state-progress'>Curso iniciado</span>";
     } elseif ($completadas_count < $total) {
         $estado = "<span class='state-progress'>En progreso ({$porcentaje}%)</span>";
     } else {
-        $estado = $aprobado ? "<span class='state-complete'>Completado y aprobado</span>" : "<span class='state-complete'>Completado (pendiente de aprobación)</span>";
+        $estado = $aprobado ? "<span class='state-complete'>Completado (aprobado)</span>" : "<span class='state-progress'>Pendiente de aprobación</span>";
     }
 
     return $estado;
@@ -2376,12 +2428,7 @@ add_shortcode('cl_form_inscripcion', function($atts) {
         'order' => 'ASC',
     ]);
 
-    $eligible = [];
-    foreach ($cursos as $c) {
-        if (cl_course_access_mode($c->ID) !== 'inscripcion') continue;
-        if (cl_is_user_enrolled_in_course($user_id, $c->ID)) continue;
-        $eligible[] = $c;
-    }
+    $pending = cl_get_user_pending_enrollments($user_id);
 
     $notice = '';
     if (!empty($_POST['cl_insc_submit']) && !empty($_POST['cl_insc_nonce']) && wp_verify_nonce($_POST['cl_insc_nonce'], 'cl_insc_submit')) {
@@ -2399,6 +2446,9 @@ add_shortcode('cl_form_inscripcion', function($atts) {
         if (empty($selected_ok)) {
             $notice = '<div class="cl-no-access">Selecciona al menos un curso disponible.</div>';
         } else {
+            // Marcar como "pendiente" en el usuario
+            cl_add_user_pending_enrollments($user_id, $selected_ok);
+
             $token = cl_create_enrollment_request_token($user_id, $selected_ok);
             $review_link = admin_url('admin-post.php?action=cl_review_enrollment_request&token=' . urlencode($token));
 
@@ -2421,7 +2471,11 @@ add_shortcode('cl_form_inscripcion', function($atts) {
         }
     }
 
-    if (empty($eligible)) {
+    $has_insc_courses = false;
+    foreach ($cursos as $c) {
+        if (cl_course_access_mode($c->ID) === 'inscripcion') { $has_insc_courses = true; break; }
+    }
+    if (!$has_insc_courses) {
         return $notice . '<div class="cl-no-access" style="border-left-color:#ffb900; background:#fffbea;">No hay cursos disponibles para solicitar inscripción.</div>';
     }
 
@@ -2432,11 +2486,26 @@ add_shortcode('cl_form_inscripcion', function($atts) {
         <?php wp_nonce_field('cl_insc_submit', 'cl_insc_nonce'); ?>
         <p>Selecciona los cursos en los que quieres inscribirte:</p>
         <div class="cl-insc-list">
-            <?php foreach ($eligible as $c): ?>
-                <label style="display:block; margin:6px 0;">
-                    <input type="checkbox" name="cl_courses[]" value="<?php echo esc_attr($c->ID); ?>" />
-                    <?php echo esc_html($c->post_title); ?>
-                </label>
+            <?php
+                foreach ($cursos as $c):
+                    if (cl_course_access_mode($c->ID) !== 'inscripcion') continue;
+                    $cid = (int)$c->ID;
+                    $is_enrolled = cl_is_user_enrolled_in_course($user_id, $cid);
+                    $is_pending = !$is_enrolled && in_array($cid, $pending, true);
+            ?>
+                <div class="cl-insc-item" style="display:flex; gap:10px; align-items:center; justify-content:space-between; border:1px solid #e6e6e6; border-radius:10px; padding:10px 12px; margin:8px 0; background:#fff;">
+                    <label style="display:flex; gap:10px; align-items:center; margin:0;">
+                        <?php if (!$is_enrolled && !$is_pending): ?>
+                            <input type="checkbox" name="cl_courses[]" value="<?php echo esc_attr($cid); ?>" />
+                        <?php endif; ?>
+                        <span><?php echo esc_html($c->post_title); ?></span>
+                    </label>
+                    <?php if ($is_enrolled): ?>
+                        <span class="cl-tag cl-tag-ok">Inscrito</span>
+                    <?php elseif ($is_pending): ?>
+                        <span class="cl-tag cl-tag-warn">Pendiente de aprobación</span>
+                    <?php endif; ?>
+                </div>
             <?php endforeach; ?>
         </div>
         <p style="margin-top:12px;">
@@ -2553,6 +2622,9 @@ add_action('admin_post_cl_process_enrollment_request', function() {
         }
         $approved[] = $cid;
     }
+
+    // Limpiar pendientes del usuario (aprobados y revocados)
+    cl_remove_user_pending_enrollments($user_id, array_merge($approved, $revoked));
 
     // Email al usuario con cursos aprobados/revocados + links
     $user = get_user_by('id', $user_id);
