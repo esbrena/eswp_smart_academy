@@ -457,10 +457,10 @@
 .cl-navegacion {
     position: fixed;
     bottom: 0px;
-    left: 0px;
+    right: 0px;
     padding: 16px;
     background: white;
-    width: 100%;
+    width: calc(100% - 250px);
     border-top: 1px solid lightgrey;
     text-align: right;
 }
