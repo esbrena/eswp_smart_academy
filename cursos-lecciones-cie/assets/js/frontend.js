@@ -1,5 +1,40 @@
 (function($){
 
+    // =============================
+    // COMENZAR CURSO
+    // =============================
+    $(document).on('click', '#cl-btn-start-course', function(){
+        if(!window.cl_ajax || !cl_ajax.ajax_url) return;
+        const $btn = $(this);
+        const cursoId = parseInt($btn.data('curso'), 10) || 0;
+        const $msg = $('.cl-start-msg');
+        if(!cursoId) return;
+
+        $btn.prop('disabled', true);
+        if($msg.length) $msg.text('Iniciando curso...');
+
+        $.post(cl_ajax.ajax_url, {
+            action: 'cl_comenzar_curso',
+            nonce: cl_ajax.nonce,
+            curso_id: cursoId
+        }).done(function(res){
+            if(res && res.success){
+                window.location.reload();
+            } else {
+                $btn.prop('disabled', false);
+                const msg = (res && res.data && res.data.message) ? res.data.message : 'No se pudo iniciar el curso.';
+                if($msg.length) $msg.text(msg);
+            }
+        }).fail(function(xhr){
+            $btn.prop('disabled', false);
+            let msg = 'No se pudo iniciar el curso.';
+            if(xhr && xhr.responseJSON && xhr.responseJSON.data && xhr.responseJSON.data.message){
+                msg = xhr.responseJSON.data.message;
+            }
+            if($msg.length) $msg.text(msg);
+        });
+    });
+
     const progressEl = $('#cl-progress-data');
     if(!progressEl.length) return;
 
@@ -13,6 +48,9 @@
     const isVideoLesson = String(progressEl.data('isVideo')) === '1';
     const wasCompleted = String(progressEl.data('state')) === '1';
     const examLocked = String(progressEl.data('examLock')) === '1';
+    const lessonType = String(progressEl.data('lessonType') || 'normal').toLowerCase().trim();
+    const isExamLesson = lessonType === 'examen';
+    const shouldTrackTime = (tiempoMinSegundos > 0) && !isExamLesson;
 
     let progreso = lastSavedInicial;   // segundos acumulados (no resetea al volver a entrar)
     let maxVisto = lastSavedInicial;   // para limitar el adelanto en vídeo
@@ -39,6 +77,7 @@
     }
 
     function sendTick(tiempo, tipo){
+        if(!shouldTrackTime) return;
         tiempo = parseInt(tiempo, 10) || 0;
         if(tiempo <= lastSent) return; // solo si es mayor al último guardado/enviado
 
@@ -78,6 +117,7 @@
 
     function startScreenTimer(){
         // Para lecciones sin vídeo: cuenta tiempo en pantalla sin resetear
+        if(!shouldTrackTime) return;
         updateUI();
         setInterval(function(){
             progreso += 1;
@@ -148,6 +188,7 @@
         // Guardar progreso al reproducir, y cada segundo mientras esté en play
         let intervalId = null;
         function ensureInterval(){
+            if(!shouldTrackTime) return;
             if(intervalId) return;
             intervalId = setInterval(function(){
                 if(videoEl.paused || videoEl.ended || videoEl.seeking) return;
@@ -167,6 +208,7 @@
 
         // Flush al salir
         window.addEventListener('beforeunload', function(){
+            if(!shouldTrackTime) return;
             const t = Math.floor(videoEl.currentTime || 0);
             if(t > progreso){
                 progreso = t;
@@ -228,6 +270,109 @@
     // EXAMEN
     // =============================
     let examTimerId = null;
+    let examForceSubmit = false;
+
+    function initExamStepper($form){
+        const $steps = $form.find('.cl-exam-step');
+        const total = $steps.length;
+        if(total <= 0) return;
+
+        let cur = 0;
+        $form.data('clExamCur', 0);
+
+        const $prog = $form.find('.cl-exam-progress');
+        const $cur = $prog.find('.cl-exam-step-cur');
+        const $tot = $prog.find('.cl-exam-step-total');
+        if($tot.length) $tot.text(String(total));
+
+        function showStep(idx){
+            idx = Math.max(0, Math.min(total - 1, idx));
+            cur = idx;
+            $form.data('clExamCur', idx);
+            $steps.hide().eq(idx).show();
+            $form.find('.cl-exam-nav').show();
+            $form.find('.cl-exam-review').hide();
+            if($cur.length) $cur.text(String(idx + 1));
+            updateNav();
+        }
+
+        function updateNav(){
+            const isFirst = cur === 0;
+            const isLast = cur === total - 1;
+            $form.find('.cl-exam-prev').prop('disabled', isFirst);
+            $form.find('.cl-exam-next').text(isLast ? 'Ir a revisión' : 'Continuar');
+        }
+
+        function questionText($step){
+            const t = $step.find('.cl-exam-qt').first().text().trim();
+            return t || ('Pregunta ' + (parseInt($step.data('step'), 10) + 1));
+        }
+
+        function isAnswered($step){
+            if($step.find('input[type="radio"]:checked, input[type="checkbox"]:checked').length > 0) return true;
+            const txt = String($step.find('textarea').val() || '').trim();
+            return txt.length > 0;
+        }
+
+        function renderReview(){
+            const $review = $form.find('.cl-exam-review');
+            const $list = $review.find('.cl-exam-review-list');
+            $list.empty();
+
+            $steps.each(function(i){
+                const $s = $(this);
+                const answered = isAnswered($s);
+                const txt = questionText($s);
+                const cls = answered ? 'answered' : 'unanswered';
+                const badge = answered ? 'Respondida' : 'Sin responder';
+                const $row = $(`
+                    <div class="cl-exam-review-item ${cls}" data-jump="${i}">
+                        <div class="cl-exam-review-title"><strong>${i+1}.</strong> ${$('<div>').text(txt).html()}</div>
+                        <div class="cl-exam-review-meta">
+                            <span class="cl-exam-review-badge">${badge}</span>
+                            <button type="button" class="cl-btn cl-exam-jump">Ir</button>
+                        </div>
+                    </div>
+                `);
+                $list.append($row);
+            });
+
+            $steps.hide();
+            $form.find('.cl-exam-nav').hide();
+            $review.show();
+            $('html, body').animate({ scrollTop: $review.offset().top - 20 }, 200);
+        }
+
+        $(document).off('click.clExamPrev').on('click.clExamPrev', '.cl-exam-prev', function(){
+            showStep(cur - 1);
+        });
+
+        $(document).off('click.clExamNext').on('click.clExamNext', '.cl-exam-next', function(){
+            if(cur >= total - 1){
+                renderReview();
+            } else {
+                showStep(cur + 1);
+            }
+        });
+
+        $(document).off('click.clExamReviewBtn').on('click.clExamReviewBtn', '.cl-exam-review-btn', function(){
+            renderReview();
+        });
+
+        $(document).off('click.clExamBack').on('click.clExamBack', '.cl-exam-back-to-questions', function(){
+            showStep(cur);
+            $('html, body').animate({ scrollTop: $form.offset().top - 20 }, 200);
+        });
+
+        $(document).off('click.clExamJump').on('click.clExamJump', '.cl-exam-jump', function(){
+            const idx = parseInt($(this).closest('.cl-exam-review-item').data('jump'), 10);
+            showStep(isNaN(idx) ? 0 : idx);
+            $('html, body').animate({ scrollTop: $form.offset().top - 20 }, 200);
+        });
+
+        showStep(0);
+    }
+
     function stopExamTimer(){
         if(examTimerId){
             clearInterval(examTimerId);
@@ -258,6 +403,7 @@
                 stopExamTimer();
                 // Bloquear inputs y auto-enviar
                 const $form = $('#cl-exam-form');
+                examForceSubmit = true;
                 $form.find('input, textarea, select, button').prop('disabled', true);
                 // Re-habilitar submit para poder enviar
                 $form.find('.cl-exam-submit').prop('disabled', false);
@@ -282,6 +428,7 @@
 
                 $('.cl-exam-intro').hide();
                 $form.show();
+                initExamStepper($form);
 
                 const $timer = $form.find('.cl-exam-timer');
                 if($timer.length){
@@ -320,9 +467,34 @@
         const $form = $(this);
         const $btn = $form.find('.cl-exam-submit');
         const $msg = $form.find('.cl-exam-msg');
+        const token = String($form.find('input[name="exam_session_token"]').val() || '');
 
         $msg.text('');
         $btn.prop('disabled', true);
+
+        if(!token){
+            $btn.prop('disabled', false);
+            alert('Debes iniciar el examen antes de enviarlo.');
+            return;
+        }
+
+        // Forzar que el envío manual se haga desde la pantalla de revisión
+        const $review = $form.find('.cl-exam-review');
+        const inReview = $review.is(':visible');
+        if(!examForceSubmit && !inReview){
+            $btn.prop('disabled', false);
+            // Llevar al usuario a revisión en vez de enviar directamente
+            $form.find('.cl-exam-review-btn').trigger('click');
+            return;
+        }
+
+        if(!examForceSubmit){
+            const ok = window.confirm('¿Confirmas que quieres enviar el examen? Una vez enviado no podrás modificarlo.');
+            if(!ok){
+                $btn.prop('disabled', false);
+                return;
+            }
+        }
 
         const payload = $form.serialize() + '&action=cl_submit_exam&nonce=' + encodeURIComponent(cl_ajax.nonce);
 
@@ -331,11 +503,13 @@
                 if(res && res.success){
                     window.location.reload();
                 } else {
+                    examForceSubmit = false;
                     $btn.prop('disabled', false);
                     $msg.text((res && res.data && res.data.message) ? res.data.message : 'Error al enviar el examen.');
                 }
             })
             .fail(function(xhr){
+                examForceSubmit = false;
                 $btn.prop('disabled', false);
                 let msg = 'Error al enviar el examen.';
                 if(xhr && xhr.responseJSON && xhr.responseJSON.data && xhr.responseJSON.data.message){

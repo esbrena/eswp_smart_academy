@@ -38,3 +38,127 @@ button.button-secondary:hover { background:#d32f2f; }
     border-radius:16px;
     background-color:lightgreen;
 }
+
+/* =========================
+   ADMIN: revisión examen
+========================= */
+.cl-exam-admin-review {
+    margin-top: 10px;
+}
+
+.cl-exam-admin-q {
+    background: #fff;
+    border: 1px solid #e6e6e6;
+    border-radius: 8px;
+    padding: 12px;
+    margin: 0 0 12px;
+}
+
+.cl-exam-admin-opts {
+    margin: 10px 0 0;
+    list-style: none;
+    padding-left: 0;
+}
+
+.cl-exam-admin-opts .cl-exam-admin-opt {
+    list-style: none;
+    position: relative;
+    display: block;
+    margin: 8px 0;
+    padding: 10px 12px 10px 40px;
+    border: 1px solid #e6e6e6;
+    border-radius: 10px;
+    background: #fff;
+    box-sizing: border-box;
+}
+
+.cl-exam-admin-opts .cl-exam-admin-opt::before {
+    content: "•";
+    position: absolute;
+    left: 14px;
+    top: 10px;
+    width: 18px;
+    height: 18px;
+    line-height: 18px;
+    text-align: center;
+    border-radius: 999px;
+    color: #6b7280;
+    background: #f3f4f6;
+    font-weight: 700;
+    font-size: 12px;
+}
+
+.cl-exam-admin-opts .cl-exam-admin-opt.is-correct {
+    color: #1e7e34;
+    font-weight: 600;
+    border-color: #46b450;
+    background: #f1fff3;
+}
+
+.cl-exam-admin-opts .cl-exam-admin-opt.is-selected {
+    border-color: #9ca3af;
+    box-shadow: 0 0 0 2px rgba(156, 163, 175, 0.15);
+}
+
+.cl-exam-admin-opts .cl-exam-admin-opt.is-wrong {
+    color: #cc1818;
+    border-color: #cc1818;
+    background: #fff5f5;
+}
+
+.cl-exam-admin-opts .cl-exam-admin-opt.is-missed {
+    border-style: dashed;
+    text-decoration: none;
+}
+
+.cl-exam-admin-opts .cl-exam-admin-opt.is-correct::before {
+    content: "✓";
+    background: #e6f4ea;
+    color: #1e7e34;
+}
+
+.cl-exam-admin-opts .cl-exam-admin-opt.is-wrong::before {
+    content: "✕";
+    background: #ffe5e5;
+    color: #cc1818;
+}
+
+.cl-exam-admin-opts .cl-exam-admin-opt.is-missed::before {
+    opacity: 0.65;
+}
+
+.cl-exam-admin-text-body {
+    margin-top: 6px;
+    padding: 10px 12px;
+    border: 1px solid #e6e6e6;
+    border-radius: 6px;
+    background: #fafafa;
+}
+
+.cl-exam-admin-score-grid {
+    margin: 10px 0 16px;
+    border: 1px solid #e6e6e6;
+    border-radius: 8px;
+    background: #fff;
+    padding: 10px;
+}
+
+.cl-exam-admin-score-row {
+    display: flex;
+    gap: 14px;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 6px;
+    border-bottom: 1px solid #f0f0f0;
+}
+.cl-exam-admin-score-row:last-child {
+    border-bottom: none;
+}
+
+.cl-exam-admin-score-label {
+    flex: 1;
+}
+
+.cl-exam-admin-score-input {
+    flex-shrink: 0;
+}

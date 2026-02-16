@@ -121,6 +121,7 @@ jQuery(function($){
         return {
             text: '',
             type: 'single',
+            points: 1,
             image_id: 0,
             options: [
                 { text: '', is_correct: 0 },
@@ -136,7 +137,8 @@ jQuery(function($){
         state.questions.forEach((q, qi) => {
             if(!q || typeof q !== 'object') q = newQuestion();
             if(!Array.isArray(q.options)) q.options = [];
-            if(q.options.length < 2) q.options = [{text:'',is_correct:0},{text:'',is_correct:0}];
+            const qtype = (q.type === 'multi' || q.type === 'text') ? q.type : 'single';
+            if(qtype !== 'text' && q.options.length < 2) q.options = [{text:'',is_correct:0},{text:'',is_correct:0}];
 
             const $q = $(`
                 <div class="cl-exam-qbox" data-qi="${qi}" style="border:1px solid #ddd; padding:12px; margin:0 0 12px; background:#fff;">
@@ -150,11 +152,18 @@ jQuery(function($){
                         <textarea class="cl-exam-qtext" rows="3" style="width:100%"></textarea>
                     </p>
 
+                    <p style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+                        <label style="font-weight:600;">Puntos</label>
+                        <input type="number" class="cl-exam-qpoints" min="0.25" step="0.25" placeholder="1" style="width:120px;" />
+                        <span class="description">Puntos máximos de la pregunta (para cálculo automático).</span>
+                    </p>
+
                     <p>
                         <label style="font-weight:600;">Tipo</label>
                         <select class="cl-exam-qtype">
                             <option value="single">Single choice</option>
                             <option value="multi">Multi choice</option>
+                            <option value="text">Texto libre</option>
                         </select>
                     </p>
 
@@ -174,7 +183,9 @@ jQuery(function($){
             `);
 
             $q.find('.cl-exam-qtext').val(q.text || '');
-            $q.find('.cl-exam-qtype').val(q.type === 'multi' ? 'multi' : 'single');
+            $q.find('.cl-exam-qtype').val(qtype);
+            const pts = parseFloat((typeof q.points !== 'undefined') ? q.points : 1);
+            $q.find('.cl-exam-qpoints').val((isNaN(pts) || pts <= 0) ? 1 : pts);
 
             // Imagen
             const imgId = parseInt(q.image_id || 0, 10) || 0;
@@ -202,6 +213,11 @@ jQuery(function($){
                 $opts.append($opt);
             });
 
+            // Si es texto libre, ocultar opciones
+            if(qtype === 'text'){
+                $q.find('.cl-exam-optswrap').hide();
+            }
+
             $list.append($q);
         });
     }
@@ -210,10 +226,13 @@ jQuery(function($){
         const state = { questions: [] };
         $list.find('.cl-exam-qbox').each(function(){
             const $q = $(this);
-            const type = $q.find('.cl-exam-qtype').val() === 'multi' ? 'multi' : 'single';
+            const rawType = String($q.find('.cl-exam-qtype').val() || 'single');
+            const type = (rawType === 'multi' || rawType === 'text') ? rawType : 'single';
+            const points = parseFloat($q.find('.cl-exam-qpoints').val());
             const qObj = {
                 text: $q.find('.cl-exam-qtext').val() || '',
                 type,
+                points: (isNaN(points) || points <= 0) ? 1 : points,
                 image_id: parseInt($q.data('image_id') || 0, 10) || 0,
                 options: []
             };
@@ -224,6 +243,11 @@ jQuery(function($){
                     is_correct: $opt.find('.cl-exam-optcorrect').is(':checked') ? 1 : 0
                 });
             });
+
+            // Si es texto libre: ignorar opciones
+            if(type === 'text'){
+                qObj.options = [];
+            }
 
             // Si es single: permitir solo una correcta
             if(type === 'single'){
@@ -251,7 +275,13 @@ jQuery(function($){
     $list.on('input change', 'textarea, input, select', function(){
         // Si marca correcta en single: desmarcar resto visualmente
         const $row = $(this).closest('.cl-exam-qbox');
-        const isSingle = $row.find('.cl-exam-qtype').val() !== 'multi';
+        const t = String($row.find('.cl-exam-qtype').val() || 'single');
+        const isSingle = (t !== 'multi' && t !== 'text');
+        if(t === 'text'){
+            $row.find('.cl-exam-optswrap').hide();
+        } else {
+            $row.find('.cl-exam-optswrap').show();
+        }
         if(isSingle && $(this).hasClass('cl-exam-optcorrect') && $(this).is(':checked')){
             $row.find('.cl-exam-optcorrect').not(this).prop('checked', false);
         }

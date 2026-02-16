@@ -8,7 +8,7 @@ Author: Wembleys Studios
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define('CL_CIE_VERSION', '1.4');
+define('CL_CIE_VERSION', '1.6');
 
 /* =====================================================
    META KEYS / CONSTANTES
@@ -18,6 +18,10 @@ define('CL_META_ENROLLED_USERS', '_cl_enrolled_users'); // array user IDs
 define('CL_META_COURSE_AUTOEVAL', '_cl_course_autoeval'); // 0/1
 define('CL_META_COURSE_EXAM_NOTIFY_USER', '_cl_exam_notify_user_id'); // int user id
 define('CL_META_EXAM_TIME_SECONDS', '_cl_exam_time_seconds'); // int seconds
+define('CL_META_EXAM_MAX_GRADE', '_cl_exam_max_grade'); // float (default 10)
+
+// User meta: cursos solicitados (pendiente de aprobación de inscripción)
+define('CL_USER_META_PENDING_ENROLLMENTS', '_cl_pending_enrollments'); // array course IDs
 
 // Lecciones (reemplazo de ACF "Contenido de lección")
 define('CL_META_LESSON_TYPE', '_cl_tipo_de_leccion'); // normal | video | examen
@@ -144,6 +148,16 @@ function cl_parse_mmss_to_seconds($value) {
 }
 
 /* =====================================================
+   EXAM: NOTA MÁXIMA
+===================================================== */
+function cl_get_exam_max_grade($leccion_id) {
+    $v = get_post_meta($leccion_id, CL_META_EXAM_MAX_GRADE, true);
+    $max = is_numeric($v) ? (float) $v : 10.0;
+    if (!is_finite($max) || $max <= 0) $max = 10.0;
+    return $max;
+}
+
+/* =====================================================
    CPT: CURSOS
 ===================================================== */
 add_action( 'init', function() {
@@ -151,10 +165,49 @@ add_action( 'init', function() {
         'label' => 'Cursos',
         'public' => true,
         'menu_icon' => 'dashicons-welcome-learn-more',
-        'supports' => [ 'title', 'editor', 'thumbnail' ],
+        // Soportar Elementor/constructor (editor) + extracto (texto plano).
+        'supports' => [ 'title', 'editor', 'excerpt', 'thumbnail' ],
         'show_in_rest' => false,
     ]);
 });
+
+/* =====================================================
+   CURSO: extracto texto plano (máx 400 caracteres)
+===================================================== */
+function cl_normalize_plain_text_excerpt($text, $max_chars = 400) {
+    $text = is_string($text) ? $text : '';
+    $text = wp_strip_all_tags($text, true);
+    $text = trim(preg_replace('/\s+/', ' ', $text));
+    $max_chars = max(0, (int)$max_chars);
+    if ($max_chars > 0) {
+        if (function_exists('mb_substr')) {
+            $text = mb_substr($text, 0, $max_chars);
+        } else {
+            $text = substr($text, 0, $max_chars);
+        }
+    }
+    return $text;
+}
+
+add_filter('wp_insert_post_data', function($data, $postarr) {
+    if (!is_array($data) || empty($data['post_type']) || $data['post_type'] !== 'curso-cie') return $data;
+    $data['post_excerpt'] = cl_normalize_plain_text_excerpt($data['post_excerpt'] ?? '', 400);
+    return $data;
+}, 10, 2);
+
+/* =====================================================
+   FRONT: helpers anti-recursión (por si se usan en filtros internos)
+===================================================== */
+function cl_disable_course_content_override($disabled = true) {
+    $GLOBALS['cl_disable_course_content_override'] = $disabled ? 1 : 0;
+}
+
+function cl_is_course_content_override_disabled() {
+    return !empty($GLOBALS['cl_disable_course_content_override']);
+}
+
+// Nota: ya no forzamos el contenido del curso en `the_content`.
+// El usuario puede insertar `[cl_boton_comenzar_curso]` y `[cl_leccion_curso]` desde Elementor.
 
 /* =====================================================
    CPT: LECCIONES
@@ -279,6 +332,30 @@ function cl_get_lecciones_ordenadas($curso_id){
 }
 
 /* =====================================================
+   ESTADO: CURSO INICIADO (user_meta)
+===================================================== */
+function cl_course_started_meta_key($curso_id) {
+    return 'cl_curso_' . absint($curso_id) . '_started';
+}
+
+function cl_has_user_started_course($user_id, $curso_id) {
+    $user_id = absint($user_id);
+    $curso_id = absint($curso_id);
+    if (!$user_id || !$curso_id) return false;
+    $v = get_user_meta($user_id, cl_course_started_meta_key($curso_id), true);
+    return (int)$v > 0;
+}
+
+function cl_mark_user_started_course($user_id, $curso_id) {
+    $user_id = absint($user_id);
+    $curso_id = absint($curso_id);
+    if (!$user_id || !$curso_id) return false;
+    if (cl_has_user_started_course($user_id, $curso_id)) return true;
+    update_user_meta($user_id, cl_course_started_meta_key($curso_id), time());
+    return true;
+}
+
+/* =====================================================
    ACCESO POR INSCRIPCIÓN (utils)
 ===================================================== */
 function cl_course_access_mode($curso_id) {
@@ -303,6 +380,60 @@ function cl_is_user_enrolled_in_course($user_id, $curso_id) {
     if (cl_course_access_mode($curso_id) === 'libre') return true;
     return in_array($user_id, cl_get_enrolled_user_ids($curso_id), true);
 }
+
+function cl_get_user_pending_enrollments($user_id) {
+    $user_id = absint($user_id);
+    if (!$user_id) return [];
+    $ids = get_user_meta($user_id, CL_USER_META_PENDING_ENROLLMENTS, true);
+    if (!is_array($ids)) $ids = [];
+    $ids = array_values(array_unique(array_map('absint', $ids)));
+    return array_values(array_filter($ids));
+}
+
+function cl_add_user_pending_enrollments($user_id, $course_ids) {
+    $user_id = absint($user_id);
+    if (!$user_id) return;
+    $current = cl_get_user_pending_enrollments($user_id);
+    $add = array_values(array_unique(array_filter(array_map('absint', (array)$course_ids))));
+    $merged = array_values(array_unique(array_merge($current, $add)));
+    update_user_meta($user_id, CL_USER_META_PENDING_ENROLLMENTS, $merged);
+}
+
+function cl_remove_user_pending_enrollments($user_id, $course_ids) {
+    $user_id = absint($user_id);
+    if (!$user_id) return;
+    $current = cl_get_user_pending_enrollments($user_id);
+    $remove = array_values(array_unique(array_filter(array_map('absint', (array)$course_ids))));
+    if (empty($remove)) return;
+    $new = array_values(array_diff($current, $remove));
+    update_user_meta($user_id, CL_USER_META_PENDING_ENROLLMENTS, $new);
+}
+
+function cl_is_course_pending_for_user($user_id, $curso_id) {
+    $curso_id = absint($curso_id);
+    if (!$curso_id) return false;
+    return in_array($curso_id, cl_get_user_pending_enrollments($user_id), true);
+}
+
+/* =====================================================
+   AJAX: COMENZAR CURSO (marca "curso iniciado")
+===================================================== */
+add_action('wp_ajax_cl_comenzar_curso', function() {
+    check_ajax_referer('cl_ajax_nonce', 'nonce');
+    if (!is_user_logged_in()) wp_send_json_error(['message' => 'Debes iniciar sesión.'], 401);
+
+    $user_id = get_current_user_id();
+    $curso_id = isset($_POST['curso_id']) ? absint($_POST['curso_id']) : 0;
+    if (!$curso_id || get_post_type($curso_id) !== 'curso-cie') {
+        wp_send_json_error(['message' => 'Curso inválido.'], 400);
+    }
+    if (!cl_is_user_enrolled_in_course($user_id, $curso_id)) {
+        wp_send_json_error(['message' => 'No tienes acceso a este curso.'], 403);
+    }
+
+    cl_mark_user_started_course($user_id, $curso_id);
+    wp_send_json_success(['started' => 1]);
+});
 
 /* =====================================================
    CURSO (admin): metaboxes
@@ -609,6 +740,7 @@ function cl_render_leccion_examen_metabox($post) {
     if (!isset($exam['questions']) || !is_array($exam['questions'])) $exam['questions'] = [];
     $exam_time = (int) get_post_meta($post->ID, CL_META_EXAM_TIME_SECONDS, true);
     $exam_time_minutes = $exam_time > 0 ? (int) ceil($exam_time / 60) : 0;
+    $exam_max_grade = cl_get_exam_max_grade($post->ID);
 
     wp_nonce_field('cl_leccion_examen_save', 'cl_leccion_examen_nonce');
     ?>
@@ -617,6 +749,12 @@ function cl_render_leccion_examen_metabox($post) {
             <label style="display:block; font-weight:600; margin-bottom:6px;">Tiempo máximo del examen (minutos)</label>
             <input type="number" min="0" step="1" name="cl_exam_time_minutes" value="<?php echo esc_attr($exam_time_minutes); ?>" style="width:120px;" />
             <span class="description">0 = sin límite.</span>
+        </p>
+
+        <p>
+            <label style="display:block; font-weight:600; margin-bottom:6px;">Nota máxima del examen</label>
+            <input type="number" min="0.1" step="0.1" name="cl_exam_max_grade" value="<?php echo esc_attr($exam_max_grade); ?>" style="width:120px;" />
+            <span class="description">Por defecto: 10. La nota se calcula como (puntos_obtenidos / puntos_totales) × nota_máxima.</span>
         </p>
 
         <p class="description">
@@ -630,7 +768,7 @@ function cl_render_leccion_examen_metabox($post) {
         </div>
 
         <p class="description" style="margin-top:10px;">
-            Tipos: <strong>Single choice</strong> (una correcta) y <strong>Multi choice</strong> (varias correctas). Puedes añadir imagen por pregunta.
+            Tipos: <strong>Single choice</strong> (una correcta), <strong>Multi choice</strong> (varias correctas) y <strong>Texto libre</strong> (respuesta abierta). Puedes añadir imagen por pregunta y asignar puntos por pregunta.
         </p>
         <?php if ($tipo !== 'examen'): ?>
             <p class="description" style="margin-top:10px;"><em>Esta lección no es de tipo “examen”. El builder queda oculto/ignorado.</em></p>
@@ -668,6 +806,12 @@ add_action('save_post_lecciones-cie', function($post_id) {
         $seconds = $minutes > 0 ? ($minutes * 60) : 0;
         update_post_meta($post_id, CL_META_EXAM_TIME_SECONDS, $seconds);
 
+        // Guardar nota máxima (siempre)
+        $max_grade_raw = isset($_POST['cl_exam_max_grade']) ? sanitize_text_field(wp_unslash($_POST['cl_exam_max_grade'])) : '10';
+        $max_grade = is_numeric($max_grade_raw) ? (float) $max_grade_raw : 10.0;
+        if (!is_finite($max_grade) || $max_grade <= 0) $max_grade = 10.0;
+        update_post_meta($post_id, CL_META_EXAM_MAX_GRADE, $max_grade);
+
         // Solo guardar definición si la lección es de tipo examen
         if (cl_get_leccion_tipo($post_id) === 'examen') {
             $raw = isset($_POST['cl_exam_definition']) ? wp_unslash($_POST['cl_exam_definition']) : '';
@@ -688,8 +832,25 @@ function cl_normalize_exam_definition($decoded) {
         if (!is_array($q)) continue;
 
         $text = isset($q['text']) ? wp_kses_post($q['text']) : '';
-        $type = isset($q['type']) && in_array($q['type'], ['single', 'multi'], true) ? $q['type'] : 'single';
+        $type = isset($q['type']) && in_array($q['type'], ['single', 'multi', 'text'], true) ? $q['type'] : 'single';
         $image_id = isset($q['image_id']) ? absint($q['image_id']) : 0;
+        // Si no se define (o viene vacío/0), usar 1 por defecto.
+        $raw_points = isset($q['points']) ? $q['points'] : null;
+        $points = ($raw_points === null || $raw_points === '') ? 1.0 : (float) $raw_points;
+        if (!is_finite($points) || $points <= 0) $points = 1.0;
+
+        if ($text === '') continue;
+
+        if ($type === 'text') {
+            $out['questions'][] = [
+                'text' => $text,
+                'type' => 'text',
+                'points' => (float) $points,
+                'image_id' => $image_id,
+                'options' => [],
+            ];
+            continue;
+        }
 
         $options = [];
         if (isset($q['options']) && is_array($q['options'])) {
@@ -705,7 +866,7 @@ function cl_normalize_exam_definition($decoded) {
             }
         }
 
-        if ($text === '' || count($options) < 2) continue;
+        if (count($options) < 2) continue;
 
         // En single, mantener solo una correcta (la primera marcada).
         if ($type === 'single') {
@@ -722,6 +883,7 @@ function cl_normalize_exam_definition($decoded) {
         $out['questions'][] = [
             'text' => $text,
             'type' => $type,
+            'points' => (float) $points,
             'image_id' => $image_id,
             'options' => array_values($options),
         ];
@@ -926,8 +1088,15 @@ add_shortcode('cl_leccion_curso', function(){
     if (!cl_is_user_enrolled_in_course($user_id, $curso_id)) {
         return '<div class="cl-no-access">No tienes acceso a este curso. Debes estar inscrito por un administrador.</div>';
     }
+
+    // Gate: el contenido del curso solo se muestra si el usuario ha iniciado el curso.
+    $started = cl_has_user_started_course($user_id, $curso_id);
+    if (!$started) {
+        return '';
+    }
+
     $lecciones = cl_get_lecciones_ordenadas($curso_id);
-    if(empty($lecciones)) return 'No hay lecciones.';
+    if(empty($lecciones)) return '<div class="cl-no-access" style="border-left-color:#ffb900; background:#fffbea;">No hay lecciones todavía.</div>';
 
     $completadas = get_user_meta($user_id,"cl_curso_{$curso_id}_completadas",true);
     if(!is_array($completadas)) $completadas = [];
@@ -955,9 +1124,16 @@ add_shortcode('cl_leccion_curso', function(){
         }
     }
 
+    $leccion_tipo = cl_get_leccion_tipo($leccion_actual->ID);
+    // Importante: al filtrar contenido de lección/vídeo dentro del curso,
+    // desactivamos el override de contenido del curso para evitar recursión.
+    $prev_disable = cl_is_course_content_override_disabled();
+    cl_disable_course_content_override(true);
     $contenido = apply_filters('the_content', $leccion_actual->post_content);
+    cl_disable_course_content_override($prev_disable);
     $video = cl_render_leccion_video_frontend($leccion_actual->ID);
-    $tiempo_minimo_seg = cl_get_leccion_min_time_seconds($leccion_actual->ID);
+    // En exámenes no aplicamos tiempo mínimo de visualización (el gating es por examen).
+    $tiempo_minimo_seg = ($leccion_tipo === 'examen') ? 0 : cl_get_leccion_min_time_seconds($leccion_actual->ID);
 
     // Tiempo guardado previamente (para no resetear al volver a entrar)
     $tiempos_guardados = get_user_meta($user_id, "cl_curso_{$curso_id}_tiempos", true);
@@ -968,7 +1144,6 @@ add_shortcode('cl_leccion_curso', function(){
     $ids = wp_list_pluck($lecciones,'ID');
     $index = array_search($leccion_actual->ID, $ids);
 
-    $leccion_tipo = cl_get_leccion_tipo($leccion_actual->ID);
     $exam_ui = '';
     $exam_status = null;
     if ($leccion_tipo === 'examen') {
@@ -1006,6 +1181,11 @@ add_shortcode('cl_leccion_curso', function(){
 
                 $should_disable_next_by_time = (!$leccion_completada && $tiempo_minimo_seg > 0 && $tiempo_guardado_actual < $tiempo_minimo_seg);
             ?>
+
+            <div class="cl-course-header">
+                <a class="cl-course-close" href="<?php echo esc_url(home_url('/')); ?>" aria-label="Cerrar curso">×</a>
+            </div>
+
             <div class="cl-barra-tiempo">
                 <div class="cl-barra-llenado" style="width: <?php echo esc_attr($porcentaje_barra); ?>%"></div>
             </div>
@@ -1015,7 +1195,12 @@ add_shortcode('cl_leccion_curso', function(){
 
             <?php if($video): ?>
                 <div class="cl-video">
-                    <?php echo apply_filters('the_content', $video); ?>
+                    <?php
+                        $prev_disable = cl_is_course_content_override_disabled();
+                        cl_disable_course_content_override(true);
+                        echo apply_filters('the_content', $video); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+                        cl_disable_course_content_override($prev_disable);
+                    ?>
                 </div>
             <?php endif; ?>
 
@@ -1031,6 +1216,7 @@ add_shortcode('cl_leccion_curso', function(){
                 data-is-video="<?php echo $video ? '1' : '0'; ?>"
                 data-state="<?php echo esc_attr($leccion_completada); ?>"
                 data-exam-lock="<?php echo $disable_next_by_exam ? '1' : '0'; ?>"
+                data-lesson-type="<?php echo esc_attr($leccion_tipo); ?>"
             ></div>
 
             <?php if($leccion_tipo === 'examen'): ?>
@@ -1060,6 +1246,7 @@ add_shortcode('cl_leccion_curso', function(){
                         data-is-video="<?php echo $video ? '1' : '0'; ?>"
                         data-state="<?php echo esc_attr($leccion_completada); ?>"
                         data-exam-lock="<?php echo $disable_next_by_exam ? '1' : '0'; ?>"
+                        data-lesson-type="<?php echo esc_attr($leccion_tipo); ?>"
                         <?php echo ($should_disable_next_by_time || $disable_next_by_exam) ? 'disabled' : ''; ?>>
                         Siguiente lección →
                         </button>
@@ -1072,6 +1259,34 @@ add_shortcode('cl_leccion_curso', function(){
 
         </main>
     </div>
+    <?php
+    return ob_get_clean();
+});
+
+/* =====================================================
+   SHORTCODE: BOTÓN "COMENZAR CURSO"
+   - Solo en página singular de curso
+   - No se muestra en loops/listados
+   - No se muestra si el curso ya está iniciado
+===================================================== */
+add_shortcode('cl_boton_comenzar_curso', function() {
+    if (!is_user_logged_in()) return '';
+    if (!is_singular('curso-cie')) return '';
+    if (is_admin() || wp_doing_ajax()) return '';
+
+    $curso_id = (int) get_queried_object_id();
+    if (!$curso_id || get_post_type($curso_id) !== 'curso-cie') return '';
+
+    $user_id = get_current_user_id();
+    if (!cl_is_user_enrolled_in_course($user_id, $curso_id)) return '';
+    if (cl_has_user_started_course($user_id, $curso_id)) return '';
+
+    ob_start();
+    ?>
+    <button type="button" class="cl-btn cl-btn-start-course" id="cl-btn-start-course" data-curso="<?php echo esc_attr($curso_id); ?>">
+        Comenzar curso
+    </button>
+    <div class="cl-start-msg" aria-live="polite" style="margin-top:10px;"></div>
     <?php
     return ob_get_clean();
 });
@@ -1127,14 +1342,12 @@ function cl_render_exam_frontend($curso_id, $leccion_id, $attempt) {
     }
 
     if ($attempt && $status === 'approved') {
-        $score = get_post_meta($attempt->ID, '_cl_final_score', true);
-        $score = is_numeric($score) ? round((float)$score, 2) : '';
-        $auto = get_post_meta($attempt->ID, '_cl_auto_score', true);
-        $auto = is_numeric($auto) ? round((float)$auto, 2) : '';
+        $max_grade = cl_get_exam_max_grade($leccion_id);
+        $final_grade = get_post_meta($attempt->ID, '_cl_final_grade', true);
+        $final_grade = is_numeric($final_grade) ? round((float)$final_grade, 2) : '';
 
         $html = '<div class="cl-exam-state cl-exam-approved"><strong>Examen aprobado</strong>.';
-        if ($score !== '') $html .= ' Nota: <strong>' . esc_html($score) . '%</strong>.';
-        if ($auto !== '') $html .= ' (Auto: ' . esc_html($auto) . '%)';
+        if ($final_grade !== '') $html .= ' Nota: <strong>' . esc_html($final_grade) . ' / ' . esc_html($max_grade) . '</strong>.';
         $html .= '</div>';
         $html .= cl_render_exam_results_readonly($leccion_id, $attempt);
         return $html;
@@ -1145,6 +1358,7 @@ function cl_render_exam_frontend($curso_id, $leccion_id, $attempt) {
     }
 
     $time_limit = (int) get_post_meta($leccion_id, CL_META_EXAM_TIME_SECONDS, true);
+    $q_total = is_array($def['questions']) ? count($def['questions']) : 0;
 
     ob_start();
     ?>
@@ -1170,7 +1384,12 @@ function cl_render_exam_frontend($curso_id, $leccion_id, $attempt) {
             <button type="button" class="cl-btn cl-exam-finish" style="margin:0 0 12px;">Finalizar examen</button>
         <?php endif; ?>
 
+        <div class="cl-exam-progress" data-total="<?php echo esc_attr($q_total); ?>">
+            <strong>Pregunta <span class="cl-exam-step-cur">1</span> de <span class="cl-exam-step-total"><?php echo esc_html($q_total); ?></span></strong>
+        </div>
+
         <?php foreach ($def['questions'] as $qi => $q): ?>
+            <div class="cl-exam-step" data-step="<?php echo esc_attr($qi); ?>" style="<?php echo $qi === 0 ? '' : 'display:none;'; ?>">
             <fieldset class="cl-exam-q">
                 <legend>
                     <span class="cl-exam-qn"><?php echo esc_html($qi + 1); ?>.</span>
@@ -1182,25 +1401,51 @@ function cl_render_exam_frontend($curso_id, $leccion_id, $attempt) {
                 <?php endif; ?>
 
                 <?php
-                    $type = (isset($q['type']) && $q['type'] === 'multi') ? 'multi' : 'single';
-                    $input_type = $type === 'multi' ? 'checkbox' : 'radio';
+                    $qtype = (isset($q['type']) && in_array($q['type'], ['single', 'multi', 'text'], true)) ? $q['type'] : 'single';
                 ?>
-                <div class="cl-exam-opts" data-qtype="<?php echo esc_attr($type); ?>">
-                    <?php foreach ($q['options'] as $oi => $opt): ?>
-                        <label class="cl-exam-opt">
-                            <input
-                                type="<?php echo esc_attr($input_type); ?>"
-                                name="answers[<?php echo esc_attr($qi); ?>]<?php echo $type === 'multi' ? '[]' : ''; ?>"
-                                value="<?php echo esc_attr($oi); ?>"
-                            />
-                            <span><?php echo wp_kses_post($opt['text']); ?></span>
-                        </label>
-                    <?php endforeach; ?>
-                </div>
+
+                <?php if ($qtype === 'text'): ?>
+                    <div class="cl-exam-free">
+                        <label class="cl-exam-free-label" style="display:block; font-weight:600; margin:10px 0 6px;">Tu respuesta</label>
+                        <textarea name="answers[<?php echo esc_attr($qi); ?>]" rows="5" style="width:100%;"></textarea>
+                    </div>
+                <?php else: ?>
+                    <?php
+                        $type = $qtype === 'multi' ? 'multi' : 'single';
+                        $input_type = $type === 'multi' ? 'checkbox' : 'radio';
+                    ?>
+                    <div class="cl-exam-opts" data-qtype="<?php echo esc_attr($type); ?>">
+                        <?php foreach ($q['options'] as $oi => $opt): ?>
+                            <label class="cl-exam-opt">
+                                <input
+                                    type="<?php echo esc_attr($input_type); ?>"
+                                    name="answers[<?php echo esc_attr($qi); ?>]<?php echo $type === 'multi' ? '[]' : ''; ?>"
+                                    value="<?php echo esc_attr($oi); ?>"
+                                />
+                                <span><?php echo wp_kses_post($opt['text']); ?></span>
+                            </label>
+                        <?php endforeach; ?>
+                    </div>
+                <?php endif; ?>
             </fieldset>
+            </div>
         <?php endforeach; ?>
 
-        <button type="submit" class="cl-btn cl-exam-submit">Enviar examen</button>
+        <div class="cl-exam-nav">
+            <button type="button" class="cl-btn cl-exam-prev">Anterior</button>
+            <button type="button" class="cl-btn cl-exam-next">Continuar</button>
+            <button type="button" class="cl-btn cl-exam-review-btn">Revisar respuestas</button>
+        </div>
+
+        <div class="cl-exam-review" style="display:none;">
+            <h3 style="margin-top:0;">Revisión</h3>
+            <div class="cl-exam-review-list"></div>
+            <div class="cl-exam-review-actions" style="margin-top:12px;">
+                <button type="button" class="cl-btn cl-exam-back-to-questions">Volver a preguntas</button>
+                <button type="submit" class="cl-btn cl-exam-submit">Enviar examen</button>
+            </div>
+        </div>
+
         <div class="cl-exam-msg" aria-live="polite"></div>
     </form>
     <?php
@@ -1214,36 +1459,76 @@ function cl_render_exam_results_readonly($leccion_id, $attempt) {
     $answers = get_post_meta($attempt->ID, '_cl_answers', true);
     if (!is_array($answers)) $answers = [];
 
+    $max_grade = cl_get_exam_max_grade($leccion_id);
+    $final_grade = get_post_meta($attempt->ID, '_cl_final_grade', true);
+    if (!is_numeric($final_grade)) $final_grade = get_post_meta($attempt->ID, '_cl_auto_grade', true);
+
+    $final_breakdown = get_post_meta($attempt->ID, '_cl_final_breakdown', true);
+    if (!is_array($final_breakdown)) {
+        $final_breakdown = get_post_meta($attempt->ID, '_cl_auto_breakdown', true);
+    }
+    if (!is_array($final_breakdown)) $final_breakdown = [];
+    $final_points = get_post_meta($attempt->ID, '_cl_final_points', true);
+    if (!is_numeric($final_points)) $final_points = get_post_meta($attempt->ID, '_cl_auto_points', true);
+    $total_points = get_post_meta($attempt->ID, '_cl_total_points', true);
+
     ob_start();
     ?>
     <div class="cl-exam-results">
         <h3>Resultados</h3>
+        <?php if (is_numeric($final_grade)): ?>
+            <p class="cl-exam-grade-total"><strong>Nota:</strong> <?php echo esc_html(round((float)$final_grade, 2)); ?> / <?php echo esc_html($max_grade); ?></p>
+        <?php endif; ?>
+        <?php if (is_numeric($final_points) && is_numeric($total_points) && (float)$total_points > 0): ?>
+            <p class="cl-exam-points-total"><strong>Puntos:</strong> <?php echo esc_html(round((float)$final_points, 2)); ?> / <?php echo esc_html(round((float)$total_points, 2)); ?></p>
+        <?php endif; ?>
         <?php foreach ($def['questions'] as $qi => $q): ?>
             <div class="cl-exam-res-q">
                 <div class="cl-exam-res-title"><?php echo esc_html($qi + 1); ?>. <?php echo wp_kses_post($q['text']); ?></div>
                 <?php
-                    $selected = isset($answers[$qi]) ? (array)$answers[$qi] : [];
-                    $correct = [];
-                    foreach ($q['options'] as $oi => $opt) {
-                        if (!empty($opt['is_correct'])) $correct[] = (string)$oi;
-                    }
+                    $qtype = (isset($q['type']) && in_array($q['type'], ['single', 'multi', 'text'], true)) ? $q['type'] : 'single';
+                    $max_points = isset($q['points']) ? (float)$q['points'] : 1.0;
+                    $earned = isset($final_breakdown[$qi]['earned']) ? (float)$final_breakdown[$qi]['earned'] : null;
                 ?>
-                <ul class="cl-exam-res-opts">
-                    <?php foreach ($q['options'] as $oi => $opt): ?>
-                        <?php
-                            $is_sel = in_array((string)$oi, array_map('strval', $selected), true);
-                            $is_cor = in_array((string)$oi, $correct, true);
-                            $cls = 'cl-exam-res-opt';
-                            if ($is_cor) $cls .= ' is-correct';
-                            if ($is_sel) $cls .= ' is-selected';
-                        ?>
-                        <li class="<?php echo esc_attr($cls); ?>">
-                            <?php echo wp_kses_post($opt['text']); ?>
-                            <?php if ($is_cor): ?> <strong>(correcta)</strong><?php endif; ?>
-                            <?php if ($is_sel && !$is_cor): ?> <em>(tu respuesta)</em><?php endif; ?>
-                        </li>
-                    <?php endforeach; ?>
-                </ul>
+                <?php if (is_numeric($earned)): ?>
+                    <div class="cl-exam-qpoints"><strong>Puntos:</strong> <?php echo esc_html(round($earned, 2)); ?> / <?php echo esc_html(round($max_points, 2)); ?></div>
+                <?php endif; ?>
+
+                <?php if ($qtype === 'text'): ?>
+                    <?php $txt = isset($answers[$qi]) ? (string)$answers[$qi] : ''; ?>
+                    <div class="cl-exam-text-answer">
+                        <div class="cl-exam-text-answer-label"><strong>Tu respuesta:</strong></div>
+                        <div class="cl-exam-text-answer-body"><?php echo nl2br(esc_html($txt)); ?></div>
+                    </div>
+                <?php else: ?>
+                    <?php
+                        $selected = isset($answers[$qi]) ? (array)$answers[$qi] : [];
+                        $selected = array_values(array_unique(array_map('strval', $selected)));
+                        $correct = [];
+                        if (isset($q['options']) && is_array($q['options'])) {
+                            foreach ($q['options'] as $oi => $opt) {
+                                if (!empty($opt['is_correct'])) $correct[] = (string)$oi;
+                            }
+                        }
+                        $correct = array_values(array_unique($correct));
+                    ?>
+                    <ul class="cl-exam-res-opts">
+                        <?php foreach ($q['options'] as $oi => $opt): ?>
+                            <?php
+                                $is_sel = in_array((string)$oi, $selected, true);
+                                $is_cor = in_array((string)$oi, $correct, true);
+                                $cls = 'cl-exam-res-opt';
+                                if ($is_cor) $cls .= ' is-correct';
+                                if ($is_sel) $cls .= ' is-selected';
+                                if ($is_sel && !$is_cor) $cls .= ' is-wrong';
+                                if (!$is_sel && $is_cor) $cls .= ' is-missed';
+                            ?>
+                            <li class="<?php echo esc_attr($cls); ?>">
+                                <?php echo wp_kses_post($opt['text']); ?>
+                            </li>
+                        <?php endforeach; ?>
+                    </ul>
+                <?php endif; ?>
             </div>
         <?php endforeach; ?>
     </div>
@@ -1268,32 +1553,6 @@ add_action('wp_ajax_cl_start_exam', function() {
     }
     if (cl_get_leccion_tipo($leccion_id) !== 'examen') {
         wp_send_json_error(['message' => 'Esta lección no es un examen.'], 400);
-    }
-
-    // Validar sesión / tiempo (si aplica)
-    $time_limit = (int) get_post_meta($leccion_id, CL_META_EXAM_TIME_SECONDS, true);
-    $duration = 0;
-    $started_at = 0;
-    if ($time_limit > 0) {
-        $token = isset($_POST['exam_session_token']) ? sanitize_text_field(wp_unslash($_POST['exam_session_token'])) : '';
-        if ($token === '') wp_send_json_error(['message' => 'Debes iniciar el examen antes de enviarlo.'], 400);
-        $session = get_transient('cl_exam_session_' . $token);
-        if (!is_array($session)
-            || (int)($session['user_id'] ?? 0) !== (int)$user_id
-            || (int)($session['curso_id'] ?? 0) !== (int)$curso_id
-            || (int)($session['leccion_id'] ?? 0) !== (int)$leccion_id
-        ) {
-            wp_send_json_error(['message' => 'Sesión de examen inválida o caducada.'], 400);
-        }
-        $started_at = (int)($session['started_at'] ?? 0);
-        $duration = $started_at > 0 ? max(0, time() - $started_at) : 0;
-        // Pequeña gracia por latencia
-        if ($duration > ($time_limit + 10)) {
-            delete_transient('cl_exam_session_' . $token);
-            wp_send_json_error(['message' => 'El tiempo del examen ha finalizado.'], 409);
-        }
-        // Consumir sesión (un único envío)
-        delete_transient('cl_exam_session_' . $token);
     }
 
     $latest = cl_get_latest_exam_attempt($user_id, $curso_id, $leccion_id);
@@ -1336,6 +1595,32 @@ add_action('wp_ajax_cl_submit_exam', function() {
         wp_send_json_error(['message' => 'Esta lección no es un examen.'], 400);
     }
 
+    // Validar sesión/tiempo si hay límite
+    $time_limit = (int) get_post_meta($leccion_id, CL_META_EXAM_TIME_SECONDS, true);
+    $duration = 0;
+    $started_at = 0;
+    if ($time_limit > 0) {
+        $token = isset($_POST['exam_session_token']) ? sanitize_text_field(wp_unslash($_POST['exam_session_token'])) : '';
+        if ($token === '') wp_send_json_error(['message' => 'Debes iniciar el examen antes de enviarlo.'], 400);
+        $session = get_transient('cl_exam_session_' . $token);
+        if (!is_array($session)
+            || (int)($session['user_id'] ?? 0) !== (int)$user_id
+            || (int)($session['curso_id'] ?? 0) !== (int)$curso_id
+            || (int)($session['leccion_id'] ?? 0) !== (int)$leccion_id
+        ) {
+            wp_send_json_error(['message' => 'Sesión de examen inválida o caducada.'], 400);
+        }
+        $started_at = (int)($session['started_at'] ?? 0);
+        $duration = $started_at > 0 ? max(0, time() - $started_at) : 0;
+        // Pequeña gracia por latencia
+        if ($duration > ($time_limit + 10)) {
+            delete_transient('cl_exam_session_' . $token);
+            wp_send_json_error(['message' => 'El tiempo del examen ha finalizado.'], 409);
+        }
+        // Consumir sesión (un único envío)
+        delete_transient('cl_exam_session_' . $token);
+    }
+
     $latest = cl_get_latest_exam_attempt($user_id, $curso_id, $leccion_id);
     if (!cl_can_user_take_exam($latest)) {
         wp_send_json_error(['message' => 'Ya has realizado este examen.'], 409);
@@ -1348,7 +1633,10 @@ add_action('wp_ajax_cl_submit_exam', function() {
 
     $raw_answers = isset($_POST['answers']) ? $_POST['answers'] : [];
     $answers = cl_normalize_exam_answers($raw_answers, $def);
-    $auto_score = cl_calculate_exam_score($answers, $def); // 0-100
+    $max_grade = cl_get_exam_max_grade($leccion_id);
+    $auto = cl_calculate_exam_auto($answers, $def, $max_grade); // ['percent'=>0-100,'grade'=>0-max, ...]
+    $auto_percent = (float) ($auto['percent'] ?? 0);
+    $auto_grade = (float) ($auto['grade'] ?? 0);
 
     $attempt_id = wp_insert_post([
         'post_type' => 'cl-exam-attempt',
@@ -1364,7 +1652,12 @@ add_action('wp_ajax_cl_submit_exam', function() {
     update_post_meta($attempt_id, '_cl_lesson_id', $leccion_id);
     update_post_meta($attempt_id, '_cl_user_id', $user_id);
     update_post_meta($attempt_id, '_cl_answers', $answers);
-    update_post_meta($attempt_id, '_cl_auto_score', $auto_score);
+    update_post_meta($attempt_id, '_cl_max_grade', (float) $max_grade);
+    update_post_meta($attempt_id, '_cl_auto_score', $auto_percent); // compat (%)
+    update_post_meta($attempt_id, '_cl_auto_grade', $auto_grade);
+    update_post_meta($attempt_id, '_cl_auto_points', (float) ($auto['earned_points'] ?? 0));
+    update_post_meta($attempt_id, '_cl_total_points', (float) ($auto['total_points'] ?? 0));
+    update_post_meta($attempt_id, '_cl_auto_breakdown', $auto['breakdown'] ?? []);
     $autoeval = ((int) get_post_meta($curso_id, CL_META_COURSE_AUTOEVAL, true)) === 1;
     update_post_meta($attempt_id, '_cl_status', $autoeval ? 'approved' : 'pending_review');
     update_post_meta($attempt_id, '_cl_submitted_at', current_time('mysql'));
@@ -1372,19 +1665,30 @@ add_action('wp_ajax_cl_submit_exam', function() {
     if (!empty($duration)) update_post_meta($attempt_id, '_cl_duration_seconds', (int)$duration);
 
     if ($autoeval) {
-        update_post_meta($attempt_id, '_cl_final_score', $auto_score);
+        update_post_meta($attempt_id, '_cl_final_score', $auto_percent); // compat (%)
+        update_post_meta($attempt_id, '_cl_final_grade', $auto_grade);
+        update_post_meta($attempt_id, '_cl_final_points', (float) ($auto['earned_points'] ?? 0));
+        update_post_meta($attempt_id, '_cl_final_breakdown', $auto['breakdown'] ?? []);
         cl_mark_course_approved($user_id, $curso_id, $leccion_id);
     }
 
     cl_notify_admin_exam_submitted($attempt_id);
 
-    wp_send_json_success(['attempt_id' => $attempt_id, 'auto_score' => $auto_score]);
+    wp_send_json_success(['attempt_id' => $attempt_id, 'auto_grade' => $auto_grade, 'max_grade' => $max_grade]);
 });
 
 function cl_normalize_exam_answers($raw, $def) {
     $answers = [];
     foreach ($def['questions'] as $qi => $q) {
-        $type = (isset($q['type']) && $q['type'] === 'multi') ? 'multi' : 'single';
+        $type = (isset($q['type']) && in_array($q['type'], ['single', 'multi', 'text'], true)) ? $q['type'] : 'single';
+
+        if ($type === 'text') {
+            $v = isset($raw[$qi]) ? (string) $raw[$qi] : '';
+            $v = trim(wp_strip_all_tags(wp_unslash($v)));
+            $answers[$qi] = $v;
+            continue;
+        }
+
         $opts_count = (isset($q['options']) && is_array($q['options'])) ? count($q['options']) : 0;
         if ($opts_count < 2) continue;
 
@@ -1407,23 +1711,73 @@ function cl_normalize_exam_answers($raw, $def) {
     return $answers;
 }
 
-function cl_calculate_exam_score($answers, $def) {
-    $total = 0;
-    $ok = 0;
+function cl_calculate_exam_auto($answers, $def, $max_grade = 10.0) {
+    $breakdown = [];
+    $total_points = 0.0;
+    $earned_points = 0.0;
+    $max_grade = is_numeric($max_grade) ? (float) $max_grade : 10.0;
+    if (!is_finite($max_grade) || $max_grade <= 0) $max_grade = 10.0;
+
     foreach ($def['questions'] as $qi => $q) {
-        $total++;
-        $selected = isset($answers[$qi]) ? (array)$answers[$qi] : [];
+        $type = (isset($q['type']) && in_array($q['type'], ['single', 'multi', 'text'], true)) ? $q['type'] : 'single';
+        $points = isset($q['points']) ? (float) $q['points'] : 1.0;
+        if (!is_finite($points) || $points < 0) $points = 1.0;
+
+        $earned = 0.0;
         $correct = [];
-        foreach ($q['options'] as $oi => $opt) {
-            if (!empty($opt['is_correct'])) $correct[] = (string)$oi;
+        $selected = null;
+        $text_answer = '';
+        $needs_manual = false;
+
+        if ($type === 'text') {
+            $needs_manual = true;
+            $text_answer = isset($answers[$qi]) ? (string) $answers[$qi] : '';
+            $earned = 0.0;
+        } else {
+            $selected_arr = isset($answers[$qi]) ? (array)$answers[$qi] : [];
+            $selected_arr = array_values(array_unique(array_map('strval', $selected_arr)));
+            sort($selected_arr);
+            $selected = $selected_arr;
+
+            $correct = [];
+            if (isset($q['options']) && is_array($q['options'])) {
+                foreach ($q['options'] as $oi => $opt) {
+                    if (!empty($opt['is_correct'])) $correct[] = (string)$oi;
+                }
+            }
+            sort($correct);
+            $earned = ($selected_arr === $correct) ? $points : 0.0;
         }
-        sort($correct);
-        $sel = array_values(array_unique(array_map('strval', $selected)));
-        sort($sel);
-        if ($sel === $correct) $ok++;
+
+        $total_points += $points;
+        $earned_points += $earned;
+
+        $breakdown[$qi] = [
+            'type' => $type,
+            'points' => (float) $points,
+            'earned' => (float) $earned,
+            'needs_manual' => $needs_manual ? 1 : 0,
+            'selected' => $selected,
+            'correct' => $correct,
+            'text_answer' => $text_answer,
+        ];
     }
-    if ($total <= 0) return 0;
-    return round(($ok / $total) * 100, 2);
+
+    $percent = ($total_points > 0) ? round(($earned_points / $total_points) * 100, 2) : 0.0;
+    $grade = ($total_points > 0) ? round(($earned_points / $total_points) * $max_grade, 2) : 0.0;
+    return [
+        'percent' => $percent,
+        'grade' => $grade,
+        'earned_points' => round($earned_points, 4),
+        'total_points' => round($total_points, 4),
+        'breakdown' => $breakdown,
+    ];
+}
+
+function cl_calculate_exam_score($answers, $def) {
+    // Backward compat: devolver % (0-100)
+    $auto = cl_calculate_exam_auto($answers, $def, 10.0);
+    return (float) ($auto['percent'] ?? 0);
 }
 
 function cl_notify_admin_exam_submitted($attempt_id) {
@@ -1450,6 +1804,12 @@ function cl_notify_admin_exam_submitted($attempt_id) {
         $to = (string) get_option('admin_email');
     }
     if ($to === '') return;
+
+    // TEMP (solo para pruebas): redirigir envíos a Gmail
+    // TODO: eliminar en producción.
+    if (strtolower(trim($to)) === 'esther.garcia@wembleystudios.com') {
+        $to = 'esther.g.brena@gmail.com';
+    }
 
     $subject = sprintf('Nuevo examen realizado: %s', $curso ? $curso->post_title : ('Curso ' . $curso_id));
     $link = admin_url('admin.php?page=cl_examenes&attempt=' . absint($attempt_id));
@@ -1602,7 +1962,7 @@ function cl_render_progreso_usuarios(){
     foreach($cursos as $curso){
         echo '<h2>'.esc_html($curso->post_title).'</h2>';
         echo '<table class="widefat striped"><thead><tr>
-                <th>Usuario</th><th>Lecciones completadas</th><th>Tiempo por lección</th><th>Acciones</th>
+                <th>Usuario</th><th>Estado</th><th>Lecciones completadas</th><th>Tiempo por lección</th><th>Acciones</th>
               </tr></thead><tbody>';
 
         foreach($usuarios as $user){
@@ -1611,7 +1971,8 @@ function cl_render_progreso_usuarios(){
             if(!is_array($completadas)) $completadas=[];
             if(!is_array($tiempos)) $tiempos=[];
 
-            if(empty($completadas)) continue;
+            $started = cl_has_user_started_course($user->ID, $curso->ID);
+            if(!$started && empty($completadas)) continue;
 
             $lecciones = cl_get_lecciones_ordenadas($curso->ID);
             $lecciones_text=[];
@@ -1621,8 +1982,18 @@ function cl_render_progreso_usuarios(){
                 $lecciones_text[] = "$estado ($tiempo) ".$l->post_title;
             }
 
+            $estado_curso_html = '';
+            if(!$started){
+                $estado_curso_html = '<span class="state-no-init">No iniciado</span>';
+            } elseif(count($completadas) === 0){
+                $estado_curso_html = '<span class="state-progress">Curso iniciado</span>';
+            } else {
+                $estado_curso_html = '<span class="state-progress">En progreso</span>';
+            }
+
             echo '<tr>';
             echo '<td>'.esc_html($user->display_name).' ('.esc_html($user->user_login).')</td>';
+            echo '<td>'.$estado_curso_html.'</td>';
             echo '<td>'.count($completadas).'/'.count($lecciones).'</td>';
             echo '<td>'.implode('<br>',$lecciones_text).'</td>';
             echo '<td>
@@ -1647,6 +2018,7 @@ function cl_render_progreso_usuarios(){
         delete_user_meta($uid,"cl_curso_{$cid}_actual");
         delete_user_meta($uid,"cl_curso_{$cid}_tiempos");
         delete_user_meta($uid,"cl_curso_{$cid}_aprobado");
+        delete_user_meta($uid, cl_course_started_meta_key($cid));
 
         // Borrar histórico
         global $wpdb;
@@ -1696,7 +2068,7 @@ function cl_render_examenes_admin() {
     ]);
 
     echo '<table class="widefat striped"><thead><tr>';
-    echo '<th>Alumno</th><th>Curso</th><th>Lección</th><th>Fecha</th><th>Auto</th><th>Estado</th><th>Acción</th>';
+    echo '<th>Alumno</th><th>Curso</th><th>Lección</th><th>Fecha</th><th>Nota</th><th>Estado</th><th>Acción</th>';
     echo '</tr></thead><tbody>';
 
     if (empty($attempts)) {
@@ -1707,7 +2079,11 @@ function cl_render_examenes_admin() {
             $leccion_id = (int)get_post_meta($a->ID, '_cl_lesson_id', true);
             $user_id = (int)get_post_meta($a->ID, '_cl_user_id', true);
             $submitted = (string)get_post_meta($a->ID, '_cl_submitted_at', true);
-            $auto = get_post_meta($a->ID, '_cl_auto_score', true);
+            $final_grade = get_post_meta($a->ID, '_cl_final_grade', true);
+            $auto_grade = get_post_meta($a->ID, '_cl_auto_grade', true);
+            $grade = is_numeric($final_grade) ? $final_grade : $auto_grade;
+            $max_grade = get_post_meta($a->ID, '_cl_max_grade', true);
+            if (!is_numeric($max_grade) || (float)$max_grade <= 0) $max_grade = 10;
             $st = (string)get_post_meta($a->ID, '_cl_status', true);
 
             $user = get_user_by('id', $user_id);
@@ -1720,7 +2096,7 @@ function cl_render_examenes_admin() {
             echo '<td>' . esc_html($curso ? $curso->post_title : $curso_id) . '</td>';
             echo '<td>' . esc_html($leccion ? $leccion->post_title : $leccion_id) . '</td>';
             echo '<td>' . esc_html($submitted ?: get_the_date('Y-m-d H:i', $a)) . '</td>';
-            echo '<td>' . esc_html(is_numeric($auto) ? (round((float)$auto, 2) . '%') : '-') . '</td>';
+            echo '<td>' . esc_html(is_numeric($grade) ? (round((float)$grade, 2) . ' / ' . round((float)$max_grade, 2)) : '-') . '</td>';
             echo '<td>' . esc_html($st) . '</td>';
             echo '<td><a class="button button-primary" href="' . esc_url($url) . '">Revisar</a></td>';
             echo '</tr>';
@@ -1741,8 +2117,8 @@ function cl_render_examen_admin_detail($attempt_id) {
     $leccion_id = (int)get_post_meta($attempt_id, '_cl_lesson_id', true);
     $user_id = (int)get_post_meta($attempt_id, '_cl_user_id', true);
     $status = (string)get_post_meta($attempt_id, '_cl_status', true);
-    $auto = get_post_meta($attempt_id, '_cl_auto_score', true);
-    $final = get_post_meta($attempt_id, '_cl_final_score', true);
+    $auto_grade = get_post_meta($attempt_id, '_cl_auto_grade', true);
+    $final_grade = get_post_meta($attempt_id, '_cl_final_grade', true);
     $answers = get_post_meta($attempt_id, '_cl_answers', true);
     if (!is_array($answers)) $answers = [];
 
@@ -1750,15 +2126,58 @@ function cl_render_examen_admin_detail($attempt_id) {
     $leccion = get_post($leccion_id);
     $user = get_user_by('id', $user_id);
 
+    $def = get_post_meta($leccion_id, '_cl_exam_definition', true);
+    if (!is_array($def) || empty($def['questions'])) {
+        $def = ['questions' => []];
+    }
+
+    // Breakdown auto (para precargar puntuación por pregunta)
+    $auto_breakdown = get_post_meta($attempt_id, '_cl_auto_breakdown', true);
+    if (!is_array($auto_breakdown)) {
+        $auto_calc = cl_calculate_exam_auto($answers, $def, cl_get_exam_max_grade($leccion_id));
+        $auto_breakdown = is_array($auto_calc['breakdown'] ?? null) ? $auto_calc['breakdown'] : [];
+    }
+
     // Procesar acciones
     if (!empty($_POST['cl_exam_action']) && check_admin_referer('cl_exam_review_' . $attempt_id)) {
         $action = sanitize_text_field($_POST['cl_exam_action']);
-        $final_score = isset($_POST['cl_final_score']) ? floatval($_POST['cl_final_score']) : null;
         $note = isset($_POST['cl_admin_note']) ? wp_kses_post(wp_unslash($_POST['cl_admin_note'])) : '';
 
         if ($action === 'approve') {
+            // Puntuación por pregunta (si viene), con fallback a auto
+            $posted_scores = isset($_POST['cl_q_score']) && is_array($_POST['cl_q_score']) ? $_POST['cl_q_score'] : [];
+            $final_breakdown = [];
+            $total_points = 0.0;
+            $final_points = 0.0;
+
+            foreach ($def['questions'] as $qi => $q) {
+                $points = isset($q['points']) ? (float)$q['points'] : 1.0;
+                if (!is_finite($points) || $points < 0) $points = 1.0;
+                $total_points += $points;
+
+                $auto_earned = isset($auto_breakdown[$qi]['earned']) ? (float)$auto_breakdown[$qi]['earned'] : 0.0;
+                $earned = $auto_earned;
+                if (isset($posted_scores[$qi])) {
+                    $earned = (float) str_replace(',', '.', (string) $posted_scores[$qi]);
+                }
+                if (!is_finite($earned)) $earned = $auto_earned;
+                $earned = max(0.0, min($points, $earned));
+                $final_points += $earned;
+
+                $final_breakdown[$qi] = is_array($auto_breakdown[$qi] ?? null) ? $auto_breakdown[$qi] : [];
+                $final_breakdown[$qi]['points'] = (float)$points;
+                $final_breakdown[$qi]['earned'] = (float)$earned;
+            }
+
+            $max_grade = cl_get_exam_max_grade($leccion_id);
+            $final_score = ($total_points > 0) ? round(($final_points / $total_points) * 100, 2) : 0.0; // compat (%)
+            $final_grade_calc = ($total_points > 0) ? round(($final_points / $total_points) * $max_grade, 2) : 0.0;
             update_post_meta($attempt_id, '_cl_status', 'approved');
-            update_post_meta($attempt_id, '_cl_final_score', is_null($final_score) ? $auto : $final_score);
+            update_post_meta($attempt_id, '_cl_final_score', $final_score);
+            update_post_meta($attempt_id, '_cl_final_grade', $final_grade_calc);
+            update_post_meta($attempt_id, '_cl_final_points', round($final_points, 4));
+            update_post_meta($attempt_id, '_cl_total_points', round($total_points, 4));
+            update_post_meta($attempt_id, '_cl_final_breakdown', $final_breakdown);
             update_post_meta($attempt_id, '_cl_admin_note', $note);
             update_post_meta($attempt_id, '_cl_reviewed_by', get_current_user_id());
             update_post_meta($attempt_id, '_cl_reviewed_at', current_time('mysql'));
@@ -1790,14 +2209,9 @@ function cl_render_examen_admin_detail($attempt_id) {
     echo '<p><strong>Curso:</strong> ' . esc_html($curso ? $curso->post_title : $curso_id) . '</p>';
     echo '<p><strong>Lección:</strong> ' . esc_html($leccion ? $leccion->post_title : $leccion_id) . '</p>';
     echo '<p><strong>Estado:</strong> ' . esc_html($status) . '</p>';
-    echo '<p><strong>Auto-score:</strong> ' . esc_html(is_numeric($auto) ? (round((float)$auto, 2) . '%') : '-') . '</p>';
-    echo '<p><strong>Nota final:</strong> ' . esc_html(is_numeric($final) ? (round((float)$final, 2) . '%') : '-') . '</p>';
-
-    $def = get_post_meta($leccion_id, '_cl_exam_definition', true);
-    if (!is_array($def) || empty($def['questions'])) {
-        echo '<p>El examen no tiene definición.</p>';
-        return;
-    }
+    $max_grade = cl_get_exam_max_grade($leccion_id);
+    $grade = is_numeric($final_grade) ? $final_grade : $auto_grade;
+    echo '<p><strong>Nota:</strong> ' . esc_html(is_numeric($grade) ? (round((float)$grade, 2) . ' / ' . $max_grade) : '-') . '</p>';
 
     echo '<h3>Respuestas del alumno</h3>';
     echo '<div class="cl-exam-admin-review">';
@@ -1807,24 +2221,45 @@ function cl_render_examen_admin_detail($attempt_id) {
         if (!empty($q['image_id'])) {
             echo '<div style="margin:8px 0;">' . wp_get_attachment_image((int)$q['image_id'], 'medium') . '</div>';
         }
-        $sel = isset($answers[$qi]) ? (array)$answers[$qi] : [];
-        $sel = array_map('strval', $sel);
-        $cor = [];
-        foreach ($q['options'] as $oi => $opt) {
-            if (!empty($opt['is_correct'])) $cor[] = (string)$oi;
+        $qtype = (isset($q['type']) && in_array($q['type'], ['single', 'multi', 'text'], true)) ? $q['type'] : 'single';
+        $points = isset($q['points']) ? (float)$q['points'] : 1.0;
+        if (!is_finite($points) || $points < 0) $points = 1.0;
+
+        $auto_earned = isset($auto_breakdown[$qi]['earned']) ? (float)$auto_breakdown[$qi]['earned'] : 0.0;
+
+        echo '<div class="cl-exam-admin-points">';
+        echo '<span class="cl-exam-admin-points-max"><strong>Puntos:</strong> ' . esc_html(round($auto_earned, 2)) . ' / ' . esc_html(round($points, 2)) . ' (auto)</span>';
+        echo '</div>';
+
+        if ($qtype === 'text') {
+            $txt = isset($answers[$qi]) ? (string)$answers[$qi] : '';
+            echo '<div class="cl-exam-admin-text">';
+            echo '<div><strong>Respuesta del alumno:</strong></div>';
+            echo '<div class="cl-exam-admin-text-body">' . nl2br(esc_html($txt)) . '</div>';
+            echo '</div>';
+        } else {
+            $sel = isset($answers[$qi]) ? (array)$answers[$qi] : [];
+            $sel = array_values(array_unique(array_map('strval', $sel)));
+            $cor = [];
+            if (isset($q['options']) && is_array($q['options'])) {
+                foreach ($q['options'] as $oi => $opt) {
+                    if (!empty($opt['is_correct'])) $cor[] = (string)$oi;
+                }
+            }
+            $cor = array_values(array_unique($cor));
+            echo '<ul class="cl-exam-admin-opts">';
+            foreach ($q['options'] as $oi => $opt) {
+                $is_sel = in_array((string)$oi, $sel, true);
+                $is_cor = in_array((string)$oi, $cor, true);
+                $cls = 'cl-exam-admin-opt';
+                if ($is_cor) $cls .= ' is-correct';
+                if ($is_sel) $cls .= ' is-selected';
+                if ($is_sel && !$is_cor) $cls .= ' is-wrong';
+                if (!$is_sel && $is_cor) $cls .= ' is-missed';
+                echo '<li class="' . esc_attr($cls) . '">' . wp_kses_post($opt['text']) . '</li>';
+            }
+            echo '</ul>';
         }
-        sort($cor);
-        echo '<ul>';
-        foreach ($q['options'] as $oi => $opt) {
-            $is_sel = in_array((string)$oi, $sel, true);
-            $is_cor = in_array((string)$oi, $cor, true);
-            $tag = '';
-            if ($is_cor) $tag .= ' <strong>(correcta)</strong>';
-            if ($is_sel && !$is_cor) $tag .= ' <em>(seleccionada)</em>';
-            if ($is_sel && $is_cor) $tag .= ' <strong>(seleccionada)</strong>';
-            echo '<li>' . wp_kses_post($opt['text']) . $tag . '</li>';
-        }
-        echo '</ul>';
         echo '</div>';
     }
     echo '</div>';
@@ -1832,7 +2267,23 @@ function cl_render_examen_admin_detail($attempt_id) {
     echo '<h3>Acciones</h3>';
     echo '<form method="post">';
     wp_nonce_field('cl_exam_review_' . $attempt_id);
-    echo '<p><label>Nota final (%) <input type="number" step="0.01" name="cl_final_score" value="' . esc_attr(is_numeric($final) ? $final : $auto) . '" /></label></p>';
+    echo '<p class="description">Puedes ajustar la puntuación por pregunta. La nota final se recalcula automáticamente al aprobar.</p>';
+    echo '<div class="cl-exam-admin-score-grid">';
+    foreach ($def['questions'] as $qi => $q) {
+        $points = isset($q['points']) ? (float)$q['points'] : 1.0;
+        if (!is_finite($points) || $points < 0) $points = 1.0;
+        $auto_earned = isset($auto_breakdown[$qi]['earned']) ? (float)$auto_breakdown[$qi]['earned'] : 0.0;
+        echo '<div class="cl-exam-admin-score-row">';
+        echo '<div class="cl-exam-admin-score-label"><strong>' . esc_html($qi + 1) . '.</strong> ' . esc_html(wp_strip_all_tags($q['text'])) . '</div>';
+        echo '<div class="cl-exam-admin-score-input">';
+        echo '<label>Puntos obtenidos ';
+        echo '<input type="number" step="0.25" min="0" max="' . esc_attr($points) . '" name="cl_q_score[' . esc_attr($qi) . ']" value="' . esc_attr($auto_earned) . '" style="width:110px;" />';
+        echo ' / ' . esc_html(round($points, 2)) . '</label>';
+        echo '</div>';
+        echo '</div>';
+    }
+    echo '</div>';
+
     echo '<p><label>Nota del profesor<br><textarea name="cl_admin_note" rows="4" style="width:100%;">' . esc_textarea((string)get_post_meta($attempt_id, '_cl_admin_note', true)) . '</textarea></label></p>';
     echo '<p>';
     echo '<button class="button button-primary" type="submit" name="cl_exam_action" value="approve">Aprobar</button> ';
@@ -1910,6 +2361,10 @@ add_shortcode('cl_estado_curso', function($atts) {
         return 'Curso sin lecciones.';
     }
 
+    // Estado inscripción/pending (solo para cursos por inscripción)
+    $access_mode = cl_course_access_mode($curso_id);
+    $is_pending_insc = ($access_mode === 'inscripcion') ? cl_is_course_pending_for_user($user_id, $curso_id) : false;
+
     // Obtener lecciones completadas por el usuario
     $completadas = get_user_meta($user_id, "cl_curso_{$curso_id}_completadas", true);
     if (!is_array($completadas)) {
@@ -1918,15 +2373,25 @@ add_shortcode('cl_estado_curso', function($atts) {
 
     $completadas_count = count($completadas);
     $porcentaje        = round(($completadas_count / $total) * 100);
+    $started = cl_has_user_started_course($user_id, $curso_id);
 
     // Determinar estado del curso
     $aprobado = (int) get_user_meta($user_id, "cl_curso_{$curso_id}_aprobado", true);
-    if ($completadas_count === 0) {
-        $estado = "<span class='state-no-init'>No iniciado</span>";
+    if ($is_pending_insc) {
+        $estado = "<span class='state-progress'>Pendiente de aprobación</span>";
+    } elseif (!$started) {
+        // Si es por inscripción y ya tiene acceso, lo consideramos "Inscrito"
+        if ($access_mode === 'inscripcion' && cl_is_user_enrolled_in_course($user_id, $curso_id)) {
+            $estado = "<span class='state-progress'>Inscrito</span>";
+        } else {
+            $estado = "<span class='state-no-init'>No iniciado</span>";
+        }
+    } elseif ($completadas_count === 0) {
+        $estado = "<span class='state-progress'>Curso iniciado</span>";
     } elseif ($completadas_count < $total) {
         $estado = "<span class='state-progress'>En progreso ({$porcentaje}%)</span>";
     } else {
-        $estado = $aprobado ? "<span class='state-complete'>Completado y aprobado</span>" : "<span class='state-complete'>Completado (pendiente de aprobación)</span>";
+        $estado = $aprobado ? "<span class='state-complete'>Completado (aprobado)</span>" : "<span class='state-progress'>Pendiente de aprobación</span>";
     }
 
     return $estado;
@@ -1946,9 +2411,15 @@ function cl_create_enrollment_request_token($user_id, $course_ids) {
     return $token;
 }
 
-add_shortcode('cl_form_inscripcion', function() {
+add_shortcode('cl_form_inscripcion', function($atts) {
     if (!is_user_logged_in()) return 'Debes iniciar sesión.';
     $user_id = get_current_user_id();
+
+    $atts = shortcode_atts([
+        'to' => '',
+    ], (array)$atts, 'cl_form_inscripcion');
+    $custom_to = sanitize_email((string)($atts['to'] ?? ''));
+    $notify_to = (is_email($custom_to)) ? $custom_to : (string) get_option('admin_email');
 
     $cursos = get_posts([
         'post_type' => 'curso-cie',
@@ -1957,12 +2428,7 @@ add_shortcode('cl_form_inscripcion', function() {
         'order' => 'ASC',
     ]);
 
-    $eligible = [];
-    foreach ($cursos as $c) {
-        if (cl_course_access_mode($c->ID) !== 'inscripcion') continue;
-        if (cl_is_user_enrolled_in_course($user_id, $c->ID)) continue;
-        $eligible[] = $c;
-    }
+    $pending = cl_get_user_pending_enrollments($user_id);
 
     $notice = '';
     if (!empty($_POST['cl_insc_submit']) && !empty($_POST['cl_insc_nonce']) && wp_verify_nonce($_POST['cl_insc_nonce'], 'cl_insc_submit')) {
@@ -1980,6 +2446,9 @@ add_shortcode('cl_form_inscripcion', function() {
         if (empty($selected_ok)) {
             $notice = '<div class="cl-no-access">Selecciona al menos un curso disponible.</div>';
         } else {
+            // Marcar como "pendiente" en el usuario
+            cl_add_user_pending_enrollments($user_id, $selected_ok);
+
             $token = cl_create_enrollment_request_token($user_id, $selected_ok);
             $review_link = admin_url('admin-post.php?action=cl_review_enrollment_request&token=' . urlencode($token));
 
@@ -1996,14 +2465,17 @@ add_shortcode('cl_form_inscripcion', function() {
             $msg .= "\nRevisar solicitud (aprobar/revocar por curso):\n";
             $msg .= $review_link . "\n";
 
-            $admin_email = (string) get_option('admin_email');
-            if ($admin_email) wp_mail($admin_email, $subject, $msg);
+            if ($notify_to) wp_mail($notify_to, $subject, $msg);
 
             $notice = '<div class="cl-no-access" style="border-left-color:#46b450; background:#f1fff3;">Solicitud enviada. Un administrador revisará tu inscripción.</div>';
         }
     }
 
-    if (empty($eligible)) {
+    $has_insc_courses = false;
+    foreach ($cursos as $c) {
+        if (cl_course_access_mode($c->ID) === 'inscripcion') { $has_insc_courses = true; break; }
+    }
+    if (!$has_insc_courses) {
         return $notice . '<div class="cl-no-access" style="border-left-color:#ffb900; background:#fffbea;">No hay cursos disponibles para solicitar inscripción.</div>';
     }
 
@@ -2014,11 +2486,26 @@ add_shortcode('cl_form_inscripcion', function() {
         <?php wp_nonce_field('cl_insc_submit', 'cl_insc_nonce'); ?>
         <p>Selecciona los cursos en los que quieres inscribirte:</p>
         <div class="cl-insc-list">
-            <?php foreach ($eligible as $c): ?>
-                <label style="display:block; margin:6px 0;">
-                    <input type="checkbox" name="cl_courses[]" value="<?php echo esc_attr($c->ID); ?>" />
-                    <?php echo esc_html($c->post_title); ?>
-                </label>
+            <?php
+                foreach ($cursos as $c):
+                    if (cl_course_access_mode($c->ID) !== 'inscripcion') continue;
+                    $cid = (int)$c->ID;
+                    $is_enrolled = cl_is_user_enrolled_in_course($user_id, $cid);
+                    $is_pending = !$is_enrolled && in_array($cid, $pending, true);
+            ?>
+                <div class="cl-insc-item" style="display:flex; gap:10px; align-items:center; justify-content:space-between; border:1px solid #e6e6e6; border-radius:10px; padding:10px 12px; margin:8px 0; background:#fff;">
+                    <label style="display:flex; gap:10px; align-items:center; margin:0;">
+                        <?php if (!$is_enrolled && !$is_pending): ?>
+                            <input type="checkbox" name="cl_courses[]" value="<?php echo esc_attr($cid); ?>" />
+                        <?php endif; ?>
+                        <span><?php echo esc_html($c->post_title); ?></span>
+                    </label>
+                    <?php if ($is_enrolled): ?>
+                        <span class="cl-tag cl-tag-ok">Inscrito</span>
+                    <?php elseif ($is_pending): ?>
+                        <span class="cl-tag cl-tag-warn">Pendiente de aprobación</span>
+                    <?php endif; ?>
+                </div>
             <?php endforeach; ?>
         </div>
         <p style="margin-top:12px;">
@@ -2135,6 +2622,9 @@ add_action('admin_post_cl_process_enrollment_request', function() {
         }
         $approved[] = $cid;
     }
+
+    // Limpiar pendientes del usuario (aprobados y revocados)
+    cl_remove_user_pending_enrollments($user_id, array_merge($approved, $revoked));
 
     // Email al usuario con cursos aprobados/revocados + links
     $user = get_user_by('id', $user_id);
