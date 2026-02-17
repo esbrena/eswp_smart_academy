@@ -223,9 +223,11 @@
 
 .cl-exam-note {
     margin-top: 10px;
-    padding: 10px 12px;
-    border-left: 4px solid #cc1818;
-    background: #fff5f5;
+    padding: 12px 14px;
+    border-left: 4px solid #0073aa;
+    background: #f0f6fc;
+    color: #0c5280;
+    border-radius: 6px;
 }
 
 .cl-exam-state {
@@ -523,4 +525,33 @@
     padding: 16px;
     border-radius: 4px;
     border: 1px solid lightgray;
+}
+
+/* Estadísticas de cursos */
+.cl-cursos-stats {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+    margin: 15px 0;
+}
+
+.cl-stat-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 16px;
+    border: 1px solid #e6e6e6;
+    border-radius: 8px;
+    background: #fff;
+}
+
+.cl-stat-label {
+    font-size: 14px;
+    color: #6b7280;
+}
+
+.cl-stat-value {
+    font-size: 18px;
+    font-weight: 700;
+    color: #007cba;
 }

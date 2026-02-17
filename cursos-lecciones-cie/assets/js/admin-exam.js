@@ -158,12 +158,10 @@ jQuery(function($){
                         <span class="description">Puntos máximos de la pregunta (para cálculo automático).</span>
                     </p>
 
-                    <p>
+                    <p style="display:none;">
                         <label style="font-weight:600;">Tipo</label>
                         <select class="cl-exam-qtype">
                             <option value="single">Single choice</option>
-                            <option value="multi">Multi choice</option>
-                            <option value="text">Texto libre</option>
                         </select>
                     </p>
 

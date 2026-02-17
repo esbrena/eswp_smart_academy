@@ -741,6 +741,8 @@ function cl_render_leccion_examen_metabox($post) {
     $exam_time = (int) get_post_meta($post->ID, CL_META_EXAM_TIME_SECONDS, true);
     $exam_time_minutes = $exam_time > 0 ? (int) ceil($exam_time / 60) : 0;
     $exam_max_grade = cl_get_exam_max_grade($post->ID);
+    $show_correct_answers = get_post_meta($post->ID, '_cl_exam_show_correct_answers', true);
+    if ($show_correct_answers === '') $show_correct_answers = '1'; // Por defecto mostrar
 
     wp_nonce_field('cl_leccion_examen_save', 'cl_leccion_examen_nonce');
     ?>
@@ -755,6 +757,14 @@ function cl_render_leccion_examen_metabox($post) {
             <label style="display:block; font-weight:600; margin-bottom:6px;">Nota máxima del examen</label>
             <input type="number" min="0.1" step="0.1" name="cl_exam_max_grade" value="<?php echo esc_attr($exam_max_grade); ?>" style="width:120px;" />
             <span class="description">Por defecto: 10. La nota se calcula como (puntos_obtenidos / puntos_totales) × nota_máxima.</span>
+        </p>
+
+        <p>
+            <label>
+                <input type="checkbox" name="cl_exam_show_correct_answers" value="1" <?php checked($show_correct_answers, '1'); ?> />
+                <strong>Mostrar respuestas correctas al estudiante</strong>
+            </label>
+            <span class="description" style="display:block; margin-left:22px;">Si está marcado, el estudiante podrá ver las respuestas correctas después de aprobar el examen.</span>
         </p>
 
         <p class="description">
@@ -811,6 +821,10 @@ add_action('save_post_lecciones-cie', function($post_id) {
         $max_grade = is_numeric($max_grade_raw) ? (float) $max_grade_raw : 10.0;
         if (!is_finite($max_grade) || $max_grade <= 0) $max_grade = 10.0;
         update_post_meta($post_id, CL_META_EXAM_MAX_GRADE, $max_grade);
+
+        // Guardar opción de mostrar respuestas correctas
+        $show_correct_answers = isset($_POST['cl_exam_show_correct_answers']) ? '1' : '0';
+        update_post_meta($post_id, '_cl_exam_show_correct_answers', $show_correct_answers);
 
         // Solo guardar definición si la lección es de tipo examen
         if (cl_get_leccion_tipo($post_id) === 'examen') {
@@ -1254,7 +1268,9 @@ add_shortcode('cl_leccion_curso', function(){
             </div>
 
             <?php if(!empty($disable_next_by_exam)): ?>
-                <p class="cl-exam-note">Para continuar, primero debes realizar el examen y esperar a que el profesor lo valide.</p>
+                <div class="cl-exam-note">
+                    <strong>ℹ️ Información:</strong> Para avanzar a la siguiente lección, primero debes completar el examen y esperar a que sea evaluado por el profesor.
+                </div>
             <?php endif; ?>
 
         </main>
@@ -1472,6 +1488,10 @@ function cl_render_exam_results_readonly($leccion_id, $attempt) {
     if (!is_numeric($final_points)) $final_points = get_post_meta($attempt->ID, '_cl_auto_points', true);
     $total_points = get_post_meta($attempt->ID, '_cl_total_points', true);
 
+    // Verificar si se deben mostrar las respuestas correctas
+    $show_correct_answers = get_post_meta($leccion_id, '_cl_exam_show_correct_answers', true);
+    if ($show_correct_answers === '') $show_correct_answers = '1'; // Por defecto mostrar
+
     ob_start();
     ?>
     <div class="cl-exam-results">
@@ -1518,10 +1538,16 @@ function cl_render_exam_results_readonly($leccion_id, $attempt) {
                                 $is_sel = in_array((string)$oi, $selected, true);
                                 $is_cor = in_array((string)$oi, $correct, true);
                                 $cls = 'cl-exam-res-opt';
-                                if ($is_cor) $cls .= ' is-correct';
+                                
+                                // Solo mostrar clases de correcto/incorrecto si la opción está habilitada
+                                if ($show_correct_answers === '1') {
+                                    if ($is_cor) $cls .= ' is-correct';
+                                    if ($is_sel && !$is_cor) $cls .= ' is-wrong';
+                                    if (!$is_sel && $is_cor) $cls .= ' is-missed';
+                                }
+                                
+                                // Siempre mostrar qué respondió el estudiante
                                 if ($is_sel) $cls .= ' is-selected';
-                                if ($is_sel && !$is_cor) $cls .= ' is-wrong';
-                                if (!$is_sel && $is_cor) $cls .= ' is-missed';
                             ?>
                             <li class="<?php echo esc_attr($cls); ?>">
                                 <?php echo wp_kses_post($opt['text']); ?>
@@ -2396,6 +2422,67 @@ add_shortcode('cl_estado_curso', function($atts) {
 
     return $estado;
 
+});
+
+/* =====================================================
+   SHORTCODE: ESTADÍSTICAS DE CURSOS DEL USUARIO
+   Muestra el número de cursos inscritos y completados
+   Uso: [cl_cursos_stats]
+===================================================== */
+add_shortcode('cl_cursos_stats', function($atts) {
+    if (!is_user_logged_in()) {
+        return '';
+    }
+
+    $user_id = get_current_user_id();
+    
+    // Obtener todos los cursos
+    $all_courses = get_posts([
+        'post_type' => 'curso-cie',
+        'posts_per_page' => -1,
+        'post_status' => 'publish',
+    ]);
+
+    $enrolled_count = 0;
+    $completed_count = 0;
+
+    foreach ($all_courses as $course) {
+        // Verificar si el usuario está inscrito
+        if (cl_is_user_enrolled_in_course($user_id, $course->ID)) {
+            $enrolled_count++;
+            
+            // Verificar si el curso está aprobado (completado)
+            $aprobado = (int) get_user_meta($user_id, "cl_curso_{$course->ID}_aprobado", true);
+            if ($aprobado === 1) {
+                $completed_count++;
+            }
+        }
+    }
+
+    $atts = shortcode_atts([
+        'format' => 'full', // full, enrolled, completed
+    ], (array)$atts, 'cl_cursos_stats');
+
+    $format = isset($atts['format']) ? $atts['format'] : 'full';
+
+    ob_start();
+    ?>
+    <div class="cl-cursos-stats">
+        <?php if ($format === 'full' || $format === 'enrolled'): ?>
+            <div class="cl-stat-item">
+                <span class="cl-stat-label">Cursos inscritos:</span>
+                <span class="cl-stat-value"><?php echo esc_html($enrolled_count); ?></span>
+            </div>
+        <?php endif; ?>
+        <?php if ($format === 'full' || $format === 'completed'): ?>
+            <div class="cl-stat-item">
+                <span class="cl-stat-label">Cursos completados:</span>
+                <span class="cl-stat-value"><?php echo esc_html($completed_count); ?></span>
+            </div>
+        <?php endif; ?>
+    </div>
+    <?php
+    return ob_get_clean();
 });
 
 /* =====================================================
