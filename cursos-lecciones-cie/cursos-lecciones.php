@@ -282,7 +282,7 @@ add_action('add_meta_boxes', function() {
    ENCOLAR FRONTEND
 ===================================================== */
 add_action('wp_enqueue_scripts', function(){
-    if(!is_singular('curso-cie')) return;
+    if (is_admin()) return;
 
     wp_enqueue_script(
         'cl-frontend-js',
@@ -329,6 +329,55 @@ function cl_get_lecciones_ordenadas($curso_id){
         'orderby'     => 'menu_order',
         'order'       => 'ASC',
     ]);
+}
+
+function cl_get_courses_exams_relation($args = []) {
+    $defaults = [
+        'post_status' => 'publish',
+        'numberposts' => -1,
+        'orderby' => 'title',
+        'order' => 'ASC',
+    ];
+    $args = wp_parse_args((array)$args, $defaults);
+
+    $courses = get_posts([
+        'post_type' => 'curso-cie',
+        'post_status' => $args['post_status'],
+        'numberposts' => (int) $args['numberposts'],
+        'orderby' => $args['orderby'],
+        'order' => $args['order'],
+    ]);
+
+    $rows = [];
+    foreach ($courses as $course) {
+        $exams = [];
+        $lessons = cl_get_lecciones_ordenadas($course->ID);
+
+        foreach ($lessons as $lesson) {
+            if (cl_get_leccion_tipo($lesson->ID) !== 'examen') continue;
+            $def = get_post_meta($lesson->ID, '_cl_exam_definition', true);
+            $questions = (is_array($def) && !empty($def['questions']) && is_array($def['questions'])) ? $def['questions'] : [];
+
+            $exams[] = [
+                'lesson_id' => (int) $lesson->ID,
+                'lesson_title' => (string) $lesson->post_title,
+                'lesson_edit_url' => get_edit_post_link($lesson->ID, ''),
+                'questions_count' => count($questions),
+                'max_grade' => (float) cl_get_exam_max_grade($lesson->ID),
+            ];
+        }
+
+        $rows[] = [
+            'course_id' => (int) $course->ID,
+            'course_title' => (string) $course->post_title,
+            'course_edit_url' => get_edit_post_link($course->ID, ''),
+            'access_mode' => cl_course_access_mode($course->ID),
+            'exams_count' => count($exams),
+            'exams' => $exams,
+        ];
+    }
+
+    return $rows;
 }
 
 /* =====================================================
@@ -413,6 +462,159 @@ function cl_is_course_pending_for_user($user_id, $curso_id) {
     $curso_id = absint($curso_id);
     if (!$curso_id) return false;
     return in_array($curso_id, cl_get_user_pending_enrollments($user_id), true);
+}
+
+function cl_get_course_user_summary($user_id, $curso_id) {
+    $user_id = absint($user_id);
+    $curso_id = absint($curso_id);
+    $summary = [
+        'valid' => false,
+        'course_id' => $curso_id,
+        'access_mode' => 'libre',
+        'is_enrolled' => false,
+        'is_pending' => false,
+        'started' => false,
+        'total_lessons' => 0,
+        'completed_lessons' => 0,
+        'progress_percent' => 0,
+        'has_exam' => false,
+        'approved' => false,
+        'all_lessons_done' => false,
+        'is_completed' => false,
+    ];
+    if (!$user_id || !$curso_id || get_post_type($curso_id) !== 'curso-cie') return $summary;
+
+    $summary['valid'] = true;
+    $summary['access_mode'] = cl_course_access_mode($curso_id);
+    $summary['is_enrolled'] = cl_is_user_enrolled_in_course($user_id, $curso_id);
+    $summary['is_pending'] = ($summary['access_mode'] === 'inscripcion') ? cl_is_course_pending_for_user($user_id, $curso_id) : false;
+    if ($summary['is_enrolled']) $summary['is_pending'] = false;
+    $summary['started'] = cl_has_user_started_course($user_id, $curso_id);
+
+    $lecciones = cl_get_lecciones_ordenadas($curso_id);
+    $summary['total_lessons'] = count($lecciones);
+    $lesson_ids = [];
+    foreach ($lecciones as $leccion) {
+        $lid = (int) $leccion->ID;
+        $lesson_ids[] = $lid;
+        if (!$summary['has_exam'] && cl_get_leccion_tipo($lid) === 'examen') {
+            $summary['has_exam'] = true;
+        }
+    }
+
+    $completadas = get_user_meta($user_id, "cl_curso_{$curso_id}_completadas", true);
+    if (!is_array($completadas)) $completadas = [];
+    $completadas = array_values(array_unique(array_filter(array_map('absint', $completadas))));
+    if (!empty($lesson_ids)) {
+        $completadas = array_values(array_intersect($completadas, $lesson_ids));
+    } else {
+        $completadas = [];
+    }
+
+    $summary['completed_lessons'] = count($completadas);
+    if ($summary['total_lessons'] > 0) {
+        $summary['progress_percent'] = (int) round(($summary['completed_lessons'] / $summary['total_lessons']) * 100);
+    }
+    $summary['approved'] = ((int) get_user_meta($user_id, "cl_curso_{$curso_id}_aprobado", true)) === 1;
+    $summary['all_lessons_done'] = $summary['total_lessons'] > 0 && $summary['completed_lessons'] >= $summary['total_lessons'];
+    $summary['is_completed'] = $summary['all_lessons_done'] && (!$summary['has_exam'] || $summary['approved']);
+
+    return $summary;
+}
+
+function cl_get_course_state_html_from_summary($summary) {
+    if (empty($summary['valid'])) return '';
+    if (!empty($summary['is_pending'])) {
+        return "<span class='state-progress'>Pendiente de aprobación</span>";
+    }
+    if (($summary['access_mode'] ?? 'libre') === 'inscripcion' && empty($summary['is_enrolled'])) {
+        return "<span class='state-no-init'>No inscrito</span>";
+    }
+    if ((int) ($summary['total_lessons'] ?? 0) === 0) {
+        return 'Curso sin lecciones.';
+    }
+    if (empty($summary['started'])) {
+        if (($summary['access_mode'] ?? 'libre') === 'inscripcion' && !empty($summary['is_enrolled'])) {
+            return "<span class='state-progress'>Inscrito</span>";
+        }
+        return "<span class='state-no-init'>No iniciado</span>";
+    }
+    if ((int) ($summary['completed_lessons'] ?? 0) === 0) {
+        return "<span class='state-progress'>Curso iniciado</span>";
+    }
+    if (empty($summary['all_lessons_done'])) {
+        $percent = (int) ($summary['progress_percent'] ?? 0);
+        return "<span class='state-progress'>En progreso ({$percent}%)</span>";
+    }
+    if (!empty($summary['has_exam']) && empty($summary['approved'])) {
+        return "<span class='state-progress'>Pendiente de aprobación</span>";
+    }
+    if (!empty($summary['has_exam'])) {
+        return "<span class='state-complete'>Completado (aprobado)</span>";
+    }
+    return "<span class='state-complete'>Completado</span>";
+}
+
+function cl_get_course_state_html($user_id, $curso_id) {
+    $user_id = absint($user_id);
+    if (!$user_id) return 'Debes iniciar sesión.';
+    return cl_get_course_state_html_from_summary(cl_get_course_user_summary($user_id, $curso_id));
+}
+
+function cl_get_course_action_html_from_summary($summary, $curso_id) {
+    $curso_id = absint($curso_id);
+    if (!$curso_id || empty($summary['valid'])) return '';
+
+    if (!empty($summary['is_pending'])) {
+        return '<span class="cl-tag cl-tag-warn">Pendiente de aprobar inscripción</span>';
+    }
+
+    if (empty($summary['is_enrolled'])) {
+        if (($summary['access_mode'] ?? 'libre') !== 'inscripcion') return '';
+        $insc_url = home_url('/inscripcion-a-cursos/');
+        return '<a class="cl-btn" href="' . esc_url($insc_url) . '">Inscribirse</a>';
+    }
+
+    if (!empty($summary['started'])) {
+        $course_url = get_permalink($curso_id);
+        if (!$course_url) return '';
+        return '<a class="cl-btn" href="' . esc_url($course_url) . '">Continuar curso</a>';
+    }
+
+    ob_start();
+    ?>
+    <div class="cl-course-action">
+        <button type="button" class="cl-btn cl-btn-start-course" data-curso="<?php echo esc_attr($curso_id); ?>">
+            Comenzar curso
+        </button>
+        <div class="cl-start-msg" aria-live="polite" style="margin-top:10px;"></div>
+    </div>
+    <?php
+    return ob_get_clean();
+}
+
+function cl_get_course_action_html($user_id, $curso_id) {
+    $user_id = absint($user_id);
+    if (!$user_id) return '';
+    return cl_get_course_action_html_from_summary(cl_get_course_user_summary($user_id, $curso_id), $curso_id);
+}
+
+function cl_get_course_id_from_context($atts = []) {
+    $atts = is_array($atts) ? $atts : [];
+    $curso_id = isset($atts['course_id']) ? absint($atts['course_id']) : 0;
+    if (!$curso_id && isset($atts['curso_id'])) {
+        $curso_id = absint($atts['curso_id']);
+    }
+    if (!$curso_id && is_singular('curso-cie')) {
+        $curso_id = (int) get_queried_object_id();
+    }
+    if (!$curso_id) {
+        global $post;
+        if ($post && $post->post_type === 'curso-cie') {
+            $curso_id = (int) $post->ID;
+        }
+    }
+    return ($curso_id && get_post_type($curso_id) === 'curso-cie') ? $curso_id : 0;
 }
 
 /* =====================================================
@@ -1281,30 +1483,18 @@ add_shortcode('cl_leccion_curso', function(){
 
 /* =====================================================
    SHORTCODE: BOTÓN "COMENZAR CURSO"
-   - Solo en página singular de curso
-   - No se muestra en loops/listados
-   - No se muestra si el curso ya está iniciado
+   - Disponible en singular y loops/listados
+   - Gestiona estados de inscripción/libre acceso
 ===================================================== */
 add_shortcode('cl_boton_comenzar_curso', function() {
     if (!is_user_logged_in()) return '';
-    if (!is_singular('curso-cie')) return '';
     if (is_admin() || wp_doing_ajax()) return '';
 
-    $curso_id = (int) get_queried_object_id();
+    $curso_id = cl_get_course_id_from_context();
     if (!$curso_id || get_post_type($curso_id) !== 'curso-cie') return '';
 
     $user_id = get_current_user_id();
-    if (!cl_is_user_enrolled_in_course($user_id, $curso_id)) return '';
-    if (cl_has_user_started_course($user_id, $curso_id)) return '';
-
-    ob_start();
-    ?>
-    <button type="button" class="cl-btn cl-btn-start-course" id="cl-btn-start-course" data-curso="<?php echo esc_attr($curso_id); ?>">
-        Comenzar curso
-    </button>
-    <div class="cl-start-msg" aria-live="polite" style="margin-top:10px;"></div>
-    <?php
-    return ob_get_clean();
+    return cl_get_course_action_html($user_id, $curso_id);
 });
 
 /* =====================================================
@@ -1342,6 +1532,71 @@ function cl_can_user_take_exam($attempt) {
     $status = (string) get_post_meta($attempt->ID, '_cl_status', true);
     // Una sola vez, salvo revocación.
     return in_array($status, ['retry_required', 'revoked_reset_course'], true);
+}
+
+function cl_get_latest_finished_exam_attempt_for_user($user_id, $curso_id = 0) {
+    $user_id = absint($user_id);
+    $curso_id = absint($curso_id);
+    if (!$user_id) return null;
+
+    $meta_query = [
+        [
+            'key' => '_cl_user_id',
+            'value' => (string) $user_id,
+            'compare' => '=',
+        ],
+        [
+            'key' => '_cl_status',
+            'value' => ['pending_review', 'approved', 'retry_required', 'revoked_reset_course'],
+            'compare' => 'IN',
+        ],
+    ];
+    if ($curso_id > 0) {
+        $meta_query[] = [
+            'key' => '_cl_course_id',
+            'value' => (string) $curso_id,
+            'compare' => '=',
+        ];
+    }
+
+    $posts = get_posts([
+        'post_type' => 'cl-exam-attempt',
+        'numberposts' => 1,
+        'orderby' => 'date',
+        'order' => 'DESC',
+        'meta_query' => $meta_query,
+    ]);
+
+    return !empty($posts) ? $posts[0] : null;
+}
+
+function cl_get_exam_attempt_grade_data($attempt_id) {
+    $attempt_id = absint($attempt_id);
+    if (!$attempt_id || get_post_type($attempt_id) !== 'cl-exam-attempt') return null;
+
+    $final_grade = get_post_meta($attempt_id, '_cl_final_grade', true);
+    $auto_grade = get_post_meta($attempt_id, '_cl_auto_grade', true);
+    $grade = is_numeric($final_grade) ? (float) $final_grade : (is_numeric($auto_grade) ? (float) $auto_grade : null);
+
+    $max_grade = get_post_meta($attempt_id, '_cl_max_grade', true);
+    if (!is_numeric($max_grade) || (float) $max_grade <= 0) {
+        $leccion_id = (int) get_post_meta($attempt_id, '_cl_lesson_id', true);
+        $max_grade = cl_get_exam_max_grade($leccion_id);
+    } else {
+        $max_grade = (float) $max_grade;
+    }
+
+    return [
+        'grade' => $grade,
+        'max_grade' => (float) $max_grade,
+    ];
+}
+
+function cl_format_grade_value($value) {
+    if (!is_numeric($value)) return '';
+    $formatted = number_format((float) $value, 2, '.', '');
+    $formatted = rtrim(rtrim($formatted, '0'), '.');
+    return $formatted === '' ? '0' : $formatted;
 }
 
 function cl_render_exam_frontend($curso_id, $leccion_id, $attempt) {
@@ -1977,6 +2232,15 @@ add_action('admin_menu', function(){
         'cl_examenes',
         'cl_render_examenes_admin'
     );
+
+    add_submenu_page(
+        'edit.php?post_type=curso-cie',
+        'Revisar solicitud de inscripción',
+        'Revisar inscripción',
+        'manage_options',
+        'cl_review_enrollment_request',
+        'cl_render_enrollment_review_admin_page'
+    );
 });
 
 function cl_render_progreso_usuarios(){
@@ -2363,64 +2627,9 @@ function cl_revoke_exam_for_user($user_id, $curso_id, $leccion_id, $reset_course
    Uso en loop de cursos
 ------------------------- */
 add_shortcode('cl_estado_curso', function($atts) {
-
-    global $post;
-
-    // Verificar que estamos en un post tipo 'curso-cie'
-    if (!$post || $post->post_type !== 'curso-cie') {
-        return '';
-    }
-
-    $curso_id = $post->ID;
-    $user_id  = get_current_user_id();
-
-    // Verificar usuario logueado
-    if (!$user_id) {
-        return 'Debes iniciar sesión.';
-    }
-
-    // Obtener lecciones del curso
-    $lecciones = cl_get_lecciones_ordenadas($curso_id);
-    $total     = count($lecciones);
-
-    if ($total === 0) {
-        return 'Curso sin lecciones.';
-    }
-
-    // Estado inscripción/pending (solo para cursos por inscripción)
-    $access_mode = cl_course_access_mode($curso_id);
-    $is_pending_insc = ($access_mode === 'inscripcion') ? cl_is_course_pending_for_user($user_id, $curso_id) : false;
-
-    // Obtener lecciones completadas por el usuario
-    $completadas = get_user_meta($user_id, "cl_curso_{$curso_id}_completadas", true);
-    if (!is_array($completadas)) {
-        $completadas = [];
-    }
-
-    $completadas_count = count($completadas);
-    $porcentaje        = round(($completadas_count / $total) * 100);
-    $started = cl_has_user_started_course($user_id, $curso_id);
-
-    // Determinar estado del curso
-    $aprobado = (int) get_user_meta($user_id, "cl_curso_{$curso_id}_aprobado", true);
-    if ($is_pending_insc) {
-        $estado = "<span class='state-progress'>Pendiente de aprobación</span>";
-    } elseif (!$started) {
-        // Si es por inscripción y ya tiene acceso, lo consideramos "Inscrito"
-        if ($access_mode === 'inscripcion' && cl_is_user_enrolled_in_course($user_id, $curso_id)) {
-            $estado = "<span class='state-progress'>Inscrito</span>";
-        } else {
-            $estado = "<span class='state-no-init'>No iniciado</span>";
-        }
-    } elseif ($completadas_count === 0) {
-        $estado = "<span class='state-progress'>Curso iniciado</span>";
-    } elseif ($completadas_count < $total) {
-        $estado = "<span class='state-progress'>En progreso ({$porcentaje}%)</span>";
-    } else {
-        $estado = $aprobado ? "<span class='state-complete'>Completado (aprobado)</span>" : "<span class='state-progress'>Pendiente de aprobación</span>";
-    }
-
-    return $estado;
+    $curso_id = cl_get_course_id_from_context((array)$atts);
+    if (!$curso_id) return '';
+    return cl_get_course_state_html(get_current_user_id(), $curso_id);
 
 });
 
@@ -2447,13 +2656,10 @@ add_shortcode('cl_cursos_stats', function($atts) {
     $completed_count = 0;
 
     foreach ($all_courses as $course) {
-        // Verificar si el usuario está inscrito
-        if (cl_is_user_enrolled_in_course($user_id, $course->ID)) {
+        $summary = cl_get_course_user_summary($user_id, $course->ID);
+        if (!empty($summary['is_enrolled'])) {
             $enrolled_count++;
-            
-            // Verificar si el curso está aprobado (completado)
-            $aprobado = (int) get_user_meta($user_id, "cl_curso_{$course->ID}_aprobado", true);
-            if ($aprobado === 1) {
+            if (!empty($summary['is_completed'])) {
                 $completed_count++;
             }
         }
@@ -2484,6 +2690,282 @@ add_shortcode('cl_cursos_stats', function($atts) {
     <?php
     return ob_get_clean();
 });
+
+function cl_render_course_cards_inline($courses, $summary_map) {
+    if (empty($courses)) {
+        return '<p class="cl-inline-tabs-empty">No hay cursos para mostrar.</p>';
+    }
+
+    ob_start();
+    ?>
+    <div class="cl-inline-course-list">
+        <?php foreach ($courses as $course): ?>
+            <?php
+                $cid = (int) $course->ID;
+                $summary = $summary_map[$cid] ?? null;
+                if (!is_array($summary)) $summary = cl_get_course_user_summary(get_current_user_id(), $cid);
+                $estado = cl_get_course_state_html_from_summary($summary);
+                $accion = cl_get_course_action_html_from_summary($summary, $cid);
+
+                $excerpt = trim((string) get_post_field('post_excerpt', $cid));
+                if ($excerpt === '') {
+                    $excerpt = wp_trim_words(wp_strip_all_tags((string) $course->post_content), 26, '...');
+                }
+            ?>
+            <article class="cl-inline-course-card">
+                <h4 class="cl-inline-course-title">
+                    <a href="<?php echo esc_url(get_permalink($cid)); ?>"><?php echo esc_html($course->post_title); ?></a>
+                </h4>
+                <?php if ($excerpt !== ''): ?>
+                    <p class="cl-inline-course-excerpt"><?php echo esc_html($excerpt); ?></p>
+                <?php endif; ?>
+                <?php if ($estado !== ''): ?>
+                    <div class="cl-inline-course-status"><?php echo $estado; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?></div>
+                <?php endif; ?>
+                <?php if ($accion !== ''): ?>
+                    <div class="cl-inline-course-cta"><?php echo $accion; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?></div>
+                <?php endif; ?>
+            </article>
+        <?php endforeach; ?>
+    </div>
+    <?php
+    return ob_get_clean();
+}
+
+function cl_render_tabs_cursos_shortcode($atts = []) {
+    if (!is_user_logged_in()) return 'Debes iniciar sesión.';
+    $user_id = get_current_user_id();
+
+    $courses = get_posts([
+        'post_type' => 'curso-cie',
+        'numberposts' => -1,
+        'post_status' => 'publish',
+        'orderby' => 'title',
+        'order' => 'ASC',
+    ]);
+
+    $summary_map = [];
+    $enrolled_courses = [];
+    $completed_courses = [];
+
+    foreach ($courses as $course) {
+        $cid = (int) $course->ID;
+        $summary = cl_get_course_user_summary($user_id, $cid);
+        $summary_map[$cid] = $summary;
+
+        if (!empty($summary['is_enrolled'])) {
+            $enrolled_courses[] = $course;
+        }
+        if (!empty($summary['is_completed'])) {
+            $completed_courses[] = $course;
+        }
+    }
+
+    static $instance = 0;
+    static $assets_printed = false;
+    $instance++;
+
+    $uid = 'cl-inline-tabs-' . $instance;
+    $tab_ids = [
+        'enrolled' => $uid . '-tab-enrolled',
+        'completed' => $uid . '-tab-completed',
+        'all' => $uid . '-tab-all',
+    ];
+    $panel_ids = [
+        'enrolled' => $uid . '-panel-enrolled',
+        'completed' => $uid . '-panel-completed',
+        'all' => $uid . '-panel-all',
+    ];
+
+    ob_start();
+
+    if (!$assets_printed) {
+        $assets_printed = true;
+        ?>
+        <style>
+            .cl-inline-tabs{margin:18px 0;}
+            .cl-inline-tabs-nav{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 14px;}
+            .cl-inline-tabs-btn{border:1px solid #d1d5db;background:#fff;color:#111827;padding:8px 12px;border-radius:8px;cursor:pointer;font-weight:600;}
+            .cl-inline-tabs-btn[aria-selected="true"]{background:#111827;color:#fff;border-color:#111827;}
+            .cl-inline-tabs-panel{border:1px solid #e5e7eb;border-radius:10px;background:#fff;padding:14px;}
+            .cl-inline-course-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;}
+            .cl-inline-course-card{border:1px solid #eef0f2;border-radius:10px;padding:12px;background:#fafafa;}
+            .cl-inline-course-title{margin:0 0 8px;font-size:16px;line-height:1.3;}
+            .cl-inline-course-title a{text-decoration:none;}
+            .cl-inline-course-excerpt{margin:0 0 10px;font-size:14px;line-height:1.4;color:#374151;}
+            .cl-inline-course-status{margin:0 0 10px;font-size:13px;}
+            .cl-inline-tabs-empty{margin:0;color:#6b7280;}
+            .cl-inline-course-cta .cl-start-msg{font-size:13px;}
+        </style>
+        <script>
+            (function(){
+                if (window.clInlineTabsReady) return;
+                window.clInlineTabsReady = true;
+
+                function activate(root, panelId){
+                    var buttons = root.querySelectorAll('[data-cl-tab-btn]');
+                    var panels = root.querySelectorAll('[data-cl-tab-panel]');
+                    buttons.forEach(function(btn){
+                        var active = btn.getAttribute('data-cl-tab-btn') === panelId;
+                        btn.setAttribute('aria-selected', active ? 'true' : 'false');
+                        btn.setAttribute('tabindex', active ? '0' : '-1');
+                    });
+                    panels.forEach(function(panel){
+                        panel.hidden = panel.id !== panelId;
+                    });
+                }
+
+                document.addEventListener('click', function(ev){
+                    var btn = ev.target.closest('[data-cl-tab-btn]');
+                    if (!btn) return;
+                    var root = btn.closest('[data-cl-inline-tabs]');
+                    if (!root) return;
+                    activate(root, btn.getAttribute('data-cl-tab-btn'));
+                });
+
+                document.addEventListener('keydown', function(ev){
+                    var btn = ev.target.closest('[data-cl-tab-btn]');
+                    if (!btn) return;
+                    var root = btn.closest('[data-cl-inline-tabs]');
+                    if (!root) return;
+
+                    var keys = ['ArrowRight', 'ArrowLeft', 'Home', 'End'];
+                    if (keys.indexOf(ev.key) === -1) return;
+
+                    var buttons = Array.prototype.slice.call(root.querySelectorAll('[data-cl-tab-btn]'));
+                    var idx = buttons.indexOf(btn);
+                    if (idx === -1) return;
+
+                    var next = idx;
+                    if (ev.key === 'ArrowRight') next = (idx + 1) % buttons.length;
+                    if (ev.key === 'ArrowLeft') next = (idx - 1 + buttons.length) % buttons.length;
+                    if (ev.key === 'Home') next = 0;
+                    if (ev.key === 'End') next = buttons.length - 1;
+
+                    ev.preventDefault();
+                    var nextBtn = buttons[next];
+                    nextBtn.focus();
+                    activate(root, nextBtn.getAttribute('data-cl-tab-btn'));
+                });
+
+                document.querySelectorAll('[data-cl-inline-tabs]').forEach(function(root){
+                    var selected = root.querySelector('[data-cl-tab-btn][aria-selected="true"]') || root.querySelector('[data-cl-tab-btn]');
+                    if (!selected) return;
+                    activate(root, selected.getAttribute('data-cl-tab-btn'));
+                });
+            })();
+        </script>
+        <?php
+    }
+    ?>
+    <div class="cl-inline-tabs" data-cl-inline-tabs id="<?php echo esc_attr($uid); ?>">
+        <div class="cl-inline-tabs-nav" role="tablist" aria-label="Cursos">
+            <button type="button" class="cl-inline-tabs-btn" role="tab"
+                    id="<?php echo esc_attr($tab_ids['enrolled']); ?>"
+                    data-cl-tab-btn="<?php echo esc_attr($panel_ids['enrolled']); ?>"
+                    aria-controls="<?php echo esc_attr($panel_ids['enrolled']); ?>"
+                    aria-selected="true" tabindex="0">Mis cursos inscritos</button>
+            <button type="button" class="cl-inline-tabs-btn" role="tab"
+                    id="<?php echo esc_attr($tab_ids['completed']); ?>"
+                    data-cl-tab-btn="<?php echo esc_attr($panel_ids['completed']); ?>"
+                    aria-controls="<?php echo esc_attr($panel_ids['completed']); ?>"
+                    aria-selected="false" tabindex="-1">Cursos completados</button>
+            <button type="button" class="cl-inline-tabs-btn" role="tab"
+                    id="<?php echo esc_attr($tab_ids['all']); ?>"
+                    data-cl-tab-btn="<?php echo esc_attr($panel_ids['all']); ?>"
+                    aria-controls="<?php echo esc_attr($panel_ids['all']); ?>"
+                    aria-selected="false" tabindex="-1">Todos los cursos</button>
+        </div>
+
+        <section class="cl-inline-tabs-panel" role="tabpanel"
+                 id="<?php echo esc_attr($panel_ids['enrolled']); ?>"
+                 data-cl-tab-panel
+                 aria-labelledby="<?php echo esc_attr($tab_ids['enrolled']); ?>">
+            <?php echo cl_render_course_cards_inline($enrolled_courses, $summary_map); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+        </section>
+
+        <section class="cl-inline-tabs-panel" role="tabpanel"
+                 id="<?php echo esc_attr($panel_ids['completed']); ?>"
+                 data-cl-tab-panel
+                 aria-labelledby="<?php echo esc_attr($tab_ids['completed']); ?>"
+                 hidden>
+            <?php echo cl_render_course_cards_inline($completed_courses, $summary_map); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+        </section>
+
+        <section class="cl-inline-tabs-panel" role="tabpanel"
+                 id="<?php echo esc_attr($panel_ids['all']); ?>"
+                 data-cl-tab-panel
+                 aria-labelledby="<?php echo esc_attr($tab_ids['all']); ?>"
+                 hidden>
+            <?php echo cl_render_course_cards_inline($courses, $summary_map); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+        </section>
+    </div>
+    <?php
+
+    return ob_get_clean();
+}
+
+add_shortcode('cl_tabs_cursos', 'cl_render_tabs_cursos_shortcode');
+add_shortcode('cl_cursos_tabs', 'cl_render_tabs_cursos_shortcode');
+
+function cl_render_nota_ultimo_examen_shortcode($atts = []) {
+    if (!is_user_logged_in()) return 'Debes iniciar sesión.';
+    $atts = shortcode_atts([
+        'empty' => 'Sin exámenes finalizados.',
+        'show_max' => '1',
+    ], (array)$atts, 'cl_nota_ultimo_examen');
+
+    $attempt = cl_get_latest_finished_exam_attempt_for_user(get_current_user_id());
+    if (!$attempt) return (string) $atts['empty'];
+
+    $grade_data = cl_get_exam_attempt_grade_data($attempt->ID);
+    if (!is_array($grade_data) || !is_numeric($grade_data['grade'])) return (string) $atts['empty'];
+
+    $grade_txt = cl_format_grade_value($grade_data['grade']);
+    if (($atts['show_max'] ?? '1') === '1') {
+        $max_txt = cl_format_grade_value($grade_data['max_grade']);
+        return $grade_txt . ' / ' . $max_txt;
+    }
+    return $grade_txt;
+}
+
+add_shortcode('cl_nota_ultimo_examen', 'cl_render_nota_ultimo_examen_shortcode');
+add_shortcode('cl_nota_ultimo_examen_finalizado', 'cl_render_nota_ultimo_examen_shortcode');
+
+function cl_render_nota_curso_actual_shortcode($atts = []) {
+    if (!is_user_logged_in()) return 'Debes iniciar sesión.';
+    $atts = shortcode_atts([
+        'course_id' => 0,
+        'empty' => 'Sin examen finalizado en este curso.',
+        'show_max' => '1',
+    ], (array)$atts, 'cl_nota_curso_actual');
+
+    $curso_id = cl_get_course_id_from_context($atts);
+    if (!$curso_id) return '';
+
+    $attempt = cl_get_latest_finished_exam_attempt_for_user(get_current_user_id(), $curso_id);
+    if (!$attempt) return (string) $atts['empty'];
+
+    $grade_data = cl_get_exam_attempt_grade_data($attempt->ID);
+    if (!is_array($grade_data) || !is_numeric($grade_data['grade'])) return (string) $atts['empty'];
+
+    $grade_txt = cl_format_grade_value($grade_data['grade']);
+    if (($atts['show_max'] ?? '1') === '1') {
+        $max_txt = cl_format_grade_value($grade_data['max_grade']);
+        return $grade_txt . ' / ' . $max_txt;
+    }
+    return $grade_txt;
+}
+
+add_shortcode('cl_nota_curso_actual', 'cl_render_nota_curso_actual_shortcode');
+add_shortcode('cl_nota_current_course', 'cl_render_nota_curso_actual_shortcode');
+
+function cl_get_enrollment_review_admin_url($token) {
+    $token = sanitize_text_field((string)$token);
+    $url = admin_url('admin.php?page=cl_review_enrollment_request');
+    if ($token === '') return $url;
+    return add_query_arg('token', rawurlencode($token), $url);
+}
 
 /* =====================================================
    SHORTCODE: FORMULARIO SOLICITUD INSCRIPCIÓN
@@ -2537,7 +3019,7 @@ add_shortcode('cl_form_inscripcion', function($atts) {
             cl_add_user_pending_enrollments($user_id, $selected_ok);
 
             $token = cl_create_enrollment_request_token($user_id, $selected_ok);
-            $review_link = admin_url('admin-post.php?action=cl_review_enrollment_request&token=' . urlencode($token));
+            $review_link = cl_get_enrollment_review_admin_url($token);
 
             $user = get_user_by('id', $user_id);
             $subject = 'Solicitud de inscripción a cursos';
@@ -2651,25 +3133,30 @@ function cl_render_enrollment_review_screen($token, $req) {
     echo '</div>';
 }
 
-add_action('admin_post_cl_review_enrollment_request', function() {
-    if (!current_user_can('manage_options')) wp_die('Sin permisos.');
+function cl_render_enrollment_review_admin_page() {
+    if (!current_user_can('manage_options')) {
+        wp_die('Sin permisos.');
+    }
+
     $token = isset($_GET['token']) ? sanitize_text_field(wp_unslash($_GET['token'])) : '';
-    if ($token === '') wp_die('Token inválido.');
+    if ($token === '') {
+        echo '<div class="wrap"><h1>Revisar solicitud de inscripción</h1><p>Token inválido.</p></div>';
+        return;
+    }
 
     $req = get_transient('cl_enroll_req_' . $token);
     if (!is_array($req) || empty($req['user_id']) || empty($req['course_ids'])) {
-        wp_die('Solicitud caducada o inválida.');
+        echo '<div class="wrap"><h1>Revisar solicitud de inscripción</h1><p>Solicitud caducada o inválida.</p></div>';
+        return;
     }
 
-    if (!function_exists('wp_admin_css')) {
-        require_once ABSPATH . 'wp-admin/includes/admin.php';
-    }
-
-    // Render WP Admin header/footer mínimos
-    @header('Content-Type: text/html; charset=' . get_option('blog_charset'));
-    require_once ABSPATH . 'wp-admin/admin-header.php';
     cl_render_enrollment_review_screen($token, $req);
-    require_once ABSPATH . 'wp-admin/admin-footer.php';
+}
+
+add_action('admin_post_cl_review_enrollment_request', function() {
+    if (!current_user_can('manage_options')) wp_die('Sin permisos.');
+    $token = isset($_GET['token']) ? sanitize_text_field(wp_unslash($_GET['token'])) : '';
+    wp_safe_redirect(cl_get_enrollment_review_admin_url($token));
     exit;
 });
 
