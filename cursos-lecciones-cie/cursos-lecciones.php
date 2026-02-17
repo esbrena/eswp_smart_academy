@@ -2470,13 +2470,13 @@ add_shortcode('cl_cursos_stats', function($atts) {
     <div class="cl-cursos-stats">
         <?php if ($format === 'full' || $format === 'enrolled'): ?>
             <div class="cl-stat-item">
-                <span class="cl-stat-label">Cursos inscritos:</span>
+                <span class="cl-stat-label">Cursos inscritos</span><br/>
                 <span class="cl-stat-value"><?php echo esc_html($enrolled_count); ?></span>
             </div>
         <?php endif; ?>
         <?php if ($format === 'full' || $format === 'completed'): ?>
             <div class="cl-stat-item">
-                <span class="cl-stat-label">Cursos completados:</span>
+                <span class="cl-stat-label">Cursos completados</span><br/>
                 <span class="cl-stat-value"><?php echo esc_html($completed_count); ?></span>
             </div>
         <?php endif; ?>
