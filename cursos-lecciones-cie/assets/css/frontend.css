@@ -28,7 +28,7 @@
 .cl-sidebar {
     width: 250px;
     border-right: 1px solid #ddd;
-    padding-right: 15px;
+    background-color: #12141a;
 }
 
 .cl-sidebar-lecciones {
@@ -38,28 +38,30 @@
 }
 
 .cl-sidebar-lecciones li {
-    padding: 8px 10px;
-    margin-bottom: 5px;
+    padding:16px;
     cursor: default;
-    border-radius: 4px;
+    color:lightgray;
 }
 
 /* Estados */
 .cl-sidebar-lecciones li.actual {
-    background: #007cba;
-    color: #fff;
+    background: #2f3341;
+    color: white;
     font-weight: bold;
 }
 
-.cl-sidebar-lecciones li.completada {
-    background: #e6f4ea;
-    color: #1e7e34;
-    cursor: pointer;
+.cl-sidebar-lecciones li.actual::before{
+    background-color: white;
 }
 
-.cl-sidebar-lecciones li.completada:hover {
-    background: #cce9d8;
+.cl-sidebar-lecciones li.completada::before{
+    background-color: #36e69f;
 }
+.cl-sidebar-lecciones li.completada{
+    color:#36e69f;
+    font-weight: bolder
+}
+
 
 /* Contenido */
 .cl-contenido {
@@ -101,17 +103,18 @@
 .cl-btn {
     display: inline-block;
     padding: 10px 18px;
-    border-radius: 8px;
-    border: 1px solid #007cba;
-    background: #007cba;
+    border-radius: 4px;
+    background: #ca1111;
     color: #fff;
     font-size: 16px;
     line-height: 1.1;
     cursor: pointer;
 }
-
+a.cl-btn:hover {
+    color: #ffffff !important;
+}
 .cl-btn:hover {
-    filter: brightness(0.95);
+    filter: brightness(0.7);
 }
 
 .cl-btn:disabled {
@@ -155,15 +158,15 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 34px;
-    height: 34px;
-    border-radius: 10px;
+    width: 42px;
+    height: 42px;
+    border-radius: 4px;
     border: 1px solid #e6e6e6;
     background: #fff;
     color: #111827;
     text-decoration: none;
     font-size: 22px;
-    line-height: 1;
+    line-height: 0.2;
 }
 .cl-course-close:hover {
     background: #f3f4f6;
@@ -493,9 +496,9 @@
 .cl-sidebar {
 	width: 250px;
     border-right: 1px solid #ddd;
-	padding:16px;
 	max-height: 100vh;
     overflow: auto;
+    background-color: #12141a;
 }
 .cl-contenido {
 	padding:16px;
@@ -525,6 +528,19 @@
     padding: 16px;
     border-radius: 4px;
     border: 1px solid lightgray;
+}
+
+.cl-sidebar-lecciones li::before{
+    content: '';
+    display: inline-block;
+    left: 0;
+    top: 0;
+    width: 10px;
+    height: 10px;
+    margin-right: 8px;
+    border-radius: 100%;
+    background-color: #5e667e;
+    position: relative;
 }
 
 /* Estadísticas de cursos */
