@@ -561,30 +561,16 @@ function cl_get_course_state_html($user_id, $curso_id) {
     return cl_get_course_state_html_from_summary(cl_get_course_user_summary($user_id, $curso_id));
 }
 
-function cl_get_course_action_html_from_summary($summary, $curso_id) {
+function cl_render_start_course_button_html($curso_id, $button_id = '') {
     $curso_id = absint($curso_id);
-    if (!$curso_id || empty($summary['valid'])) return '';
-
-    if (!empty($summary['is_pending'])) {
-        return '<span class="cl-tag cl-tag-warn">Pendiente de aprobar inscripción</span>';
-    }
-
-    if (empty($summary['is_enrolled'])) {
-        if (($summary['access_mode'] ?? 'libre') !== 'inscripcion') return '';
-        $insc_url = home_url('/inscripcion-a-cursos/');
-        return '<a class="cl-btn" href="' . esc_url($insc_url) . '">Inscribirse</a>';
-    }
-
-    if (!empty($summary['started'])) {
-        $course_url = get_permalink($curso_id);
-        if (!$course_url) return '';
-        return '<a class="cl-btn" href="' . esc_url($course_url) . '">Continuar curso</a>';
-    }
+    if (!$curso_id) return '';
+    $button_id = sanitize_key((string) $button_id);
+    $button_id_attr = $button_id !== '' ? ' id="' . esc_attr($button_id) . '"' : '';
 
     ob_start();
     ?>
     <div class="cl-course-action">
-        <button type="button" class="cl-btn cl-btn-start-course" data-curso="<?php echo esc_attr($curso_id); ?>">
+        <button type="button" class="cl-btn cl-btn-start-course"<?php echo $button_id_attr; ?> data-curso="<?php echo esc_attr($curso_id); ?>">
             Comenzar curso
         </button>
         <div class="cl-start-msg" aria-live="polite" style="margin-top:10px;"></div>
@@ -593,10 +579,44 @@ function cl_get_course_action_html_from_summary($summary, $curso_id) {
     return ob_get_clean();
 }
 
-function cl_get_course_action_html($user_id, $curso_id) {
+function cl_get_course_action_html_from_summary($summary, $curso_id, $args = []) {
+    $curso_id = absint($curso_id);
+    if (!$curso_id || empty($summary['valid'])) return '';
+
+    $args = wp_parse_args((array)$args, [
+        'show_enroll_button' => true,
+        'show_pending_label' => true,
+        'show_start_button' => false,
+        'show_continue_link' => false,
+        'start_button_id' => '',
+    ]);
+
+    if (!empty($summary['is_pending'])) {
+        if (empty($args['show_pending_label'])) return '';
+        return '<span class="cl-tag cl-tag-warn">Pendiente de aprobar inscripción</span>';
+    }
+
+    if (empty($summary['is_enrolled'])) {
+        if (($summary['access_mode'] ?? 'libre') !== 'inscripcion' || empty($args['show_enroll_button'])) return '';
+        $insc_url = home_url('/inscripcion-a-cursos/');
+        return '<a class="cl-btn" href="' . esc_url($insc_url) . '">Inscribirse</a>';
+    }
+
+    if (!empty($summary['started'])) {
+        if (empty($args['show_continue_link'])) return '';
+        $course_url = get_permalink($curso_id);
+        if (!$course_url) return '';
+        return '<a class="cl-btn" href="' . esc_url($course_url) . '">Continuar curso</a>';
+    }
+
+    if (empty($args['show_start_button'])) return '';
+    return cl_render_start_course_button_html($curso_id, (string)($args['start_button_id'] ?? ''));
+}
+
+function cl_get_course_action_html($user_id, $curso_id, $args = []) {
     $user_id = absint($user_id);
     if (!$user_id) return '';
-    return cl_get_course_action_html_from_summary(cl_get_course_user_summary($user_id, $curso_id), $curso_id);
+    return cl_get_course_action_html_from_summary(cl_get_course_user_summary($user_id, $curso_id), $curso_id, (array)$args);
 }
 
 function cl_get_course_id_from_context($atts = []) {
@@ -1494,7 +1514,13 @@ add_shortcode('cl_boton_comenzar_curso', function() {
     if (!$curso_id || get_post_type($curso_id) !== 'curso-cie') return '';
 
     $user_id = get_current_user_id();
-    return cl_get_course_action_html($user_id, $curso_id);
+    return cl_get_course_action_html($user_id, $curso_id, [
+        'show_enroll_button' => true,
+        'show_pending_label' => true,
+        'show_start_button' => true,
+        'show_continue_link' => false, // Mantener comportamiento histórico: ocultar al iniciar.
+        'start_button_id' => 'cl-btn-start-course',
+    ]);
 });
 
 /* =====================================================
@@ -2691,7 +2717,7 @@ add_shortcode('cl_cursos_stats', function($atts) {
     return ob_get_clean();
 });
 
-function cl_render_course_cards_inline($courses, $summary_map) {
+function cl_render_course_cards_inline($courses, $summary_map, $show_actions = false) {
     if (empty($courses)) {
         return '<p class="cl-inline-tabs-empty">No hay cursos para mostrar.</p>';
     }
@@ -2705,7 +2731,15 @@ function cl_render_course_cards_inline($courses, $summary_map) {
                 $summary = $summary_map[$cid] ?? null;
                 if (!is_array($summary)) $summary = cl_get_course_user_summary(get_current_user_id(), $cid);
                 $estado = cl_get_course_state_html_from_summary($summary);
-                $accion = cl_get_course_action_html_from_summary($summary, $cid);
+                $accion = '';
+                if ($show_actions) {
+                    $accion = cl_get_course_action_html_from_summary($summary, $cid, [
+                        'show_enroll_button' => true,
+                        'show_pending_label' => true,
+                        'show_start_button' => false, // El botón de comenzar se reserva para [cl_boton_comenzar_curso].
+                        'show_continue_link' => true,
+                    ]);
+                }
 
                 $excerpt = trim((string) get_post_field('post_excerpt', $cid));
                 if ($excerpt === '') {
@@ -2735,6 +2769,11 @@ function cl_render_course_cards_inline($courses, $summary_map) {
 function cl_render_tabs_cursos_shortcode($atts = []) {
     if (!is_user_logged_in()) return 'Debes iniciar sesión.';
     $user_id = get_current_user_id();
+
+    $atts = shortcode_atts([
+        'show_actions' => '0',
+    ], (array)$atts, 'cl_tabs_cursos');
+    $show_actions = in_array(strtolower((string)$atts['show_actions']), ['1', 'true', 'yes', 'si', 'sí'], true);
 
     $courses = get_posts([
         'post_type' => 'curso-cie',
@@ -2881,7 +2920,7 @@ function cl_render_tabs_cursos_shortcode($atts = []) {
                  id="<?php echo esc_attr($panel_ids['enrolled']); ?>"
                  data-cl-tab-panel
                  aria-labelledby="<?php echo esc_attr($tab_ids['enrolled']); ?>">
-            <?php echo cl_render_course_cards_inline($enrolled_courses, $summary_map); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+            <?php echo cl_render_course_cards_inline($enrolled_courses, $summary_map, $show_actions); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
         </section>
 
         <section class="cl-inline-tabs-panel" role="tabpanel"
@@ -2889,7 +2928,7 @@ function cl_render_tabs_cursos_shortcode($atts = []) {
                  data-cl-tab-panel
                  aria-labelledby="<?php echo esc_attr($tab_ids['completed']); ?>"
                  hidden>
-            <?php echo cl_render_course_cards_inline($completed_courses, $summary_map); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+            <?php echo cl_render_course_cards_inline($completed_courses, $summary_map, $show_actions); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
         </section>
 
         <section class="cl-inline-tabs-panel" role="tabpanel"
@@ -2897,7 +2936,7 @@ function cl_render_tabs_cursos_shortcode($atts = []) {
                  data-cl-tab-panel
                  aria-labelledby="<?php echo esc_attr($tab_ids['all']); ?>"
                  hidden>
-            <?php echo cl_render_course_cards_inline($courses, $summary_map); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+            <?php echo cl_render_course_cards_inline($courses, $summary_map, $show_actions); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
         </section>
     </div>
     <?php
