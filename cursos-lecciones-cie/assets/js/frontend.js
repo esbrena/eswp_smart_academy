@@ -3,11 +3,12 @@
     // =============================
     // COMENZAR CURSO
     // =============================
-    $(document).on('click', '#cl-btn-start-course', function(){
+    $(document).on('click', '.cl-btn-start-course, #cl-btn-start-course', function(){
         if(!window.cl_ajax || !cl_ajax.ajax_url) return;
         const $btn = $(this);
         const cursoId = parseInt($btn.data('curso'), 10) || 0;
-        const $msg = $('.cl-start-msg');
+        const $scope = $btn.closest('.cl-course-action');
+        const $msg = $scope.length ? $scope.find('.cl-start-msg').first() : $('.cl-start-msg').first();
         if(!cursoId) return;
 
         $btn.prop('disabled', true);
