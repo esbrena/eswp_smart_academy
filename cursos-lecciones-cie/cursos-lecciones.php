@@ -19,9 +19,14 @@ define('CL_META_COURSE_AUTOEVAL', '_cl_course_autoeval'); // 0/1
 define('CL_META_COURSE_EXAM_NOTIFY_USER', '_cl_exam_notify_user_id'); // int user id
 define('CL_META_EXAM_TIME_SECONDS', '_cl_exam_time_seconds'); // int seconds
 define('CL_META_EXAM_MAX_GRADE', '_cl_exam_max_grade'); // float (default 10)
+define('CL_META_EXAM_EMAIL_APPROVED_SUBJECT', '_cl_exam_email_approved_subject'); // string
+define('CL_META_EXAM_EMAIL_APPROVED_BODY', '_cl_exam_email_approved_body'); // string
+define('CL_META_EXAM_EMAIL_REVOKED_SUBJECT', '_cl_exam_email_revoked_subject'); // string
+define('CL_META_EXAM_EMAIL_REVOKED_BODY', '_cl_exam_email_revoked_body'); // string
 
 // User meta: cursos solicitados (pendiente de aprobación de inscripción)
 define('CL_USER_META_PENDING_ENROLLMENTS', '_cl_pending_enrollments'); // array course IDs
+define('CL_USER_META_PENDING_ENROLLMENTS_DATES', '_cl_pending_enrollments_dates'); // map course ID => timestamp
 
 // Lecciones (reemplazo de ACF "Contenido de lección")
 define('CL_META_LESSON_TYPE', '_cl_tipo_de_leccion'); // normal | video | examen
@@ -155,6 +160,114 @@ function cl_get_exam_max_grade($leccion_id) {
     $max = is_numeric($v) ? (float) $v : 10.0;
     if (!is_finite($max) || $max <= 0) $max = 10.0;
     return $max;
+}
+
+function cl_get_exam_email_default_templates($result_type = 'approved') {
+    $result_type = $result_type === 'approved' ? 'approved' : 'revoked';
+    $defaults = [
+        'approved' => [
+            'subject' => 'Examen aprobado: {course_name}',
+            'body' => "Hola {student_name},\n\nTu examen \"{lesson_name}\" del curso \"{course_name}\" ha sido aprobado.\n\nNota: {grade} / {max_grade}\nEstado: {status}\n{action_message}\n\n{admin_note}\n\nPuedes acceder al curso aquí:\n{course_url}",
+        ],
+        'revoked' => [
+            'subject' => 'Examen suspendido: {course_name}',
+            'body' => "Hola {student_name},\n\nTu examen \"{lesson_name}\" del curso \"{course_name}\" ha sido suspendido/revocado.\n\nEstado: {status}\n{action_message}\n\n{admin_note}\n\nPuedes revisar el curso aquí:\n{course_url}",
+        ],
+    ];
+    return $defaults[$result_type];
+}
+
+function cl_get_exam_email_template($lesson_id, $result_type = 'approved') {
+    $lesson_id = absint($lesson_id);
+    $result_type = $result_type === 'approved' ? 'approved' : 'revoked';
+    $defaults = cl_get_exam_email_default_templates($result_type);
+
+    $subject_key = $result_type === 'approved'
+        ? CL_META_EXAM_EMAIL_APPROVED_SUBJECT
+        : CL_META_EXAM_EMAIL_REVOKED_SUBJECT;
+    $body_key = $result_type === 'approved'
+        ? CL_META_EXAM_EMAIL_APPROVED_BODY
+        : CL_META_EXAM_EMAIL_REVOKED_BODY;
+
+    $subject = $lesson_id > 0 ? (string) get_post_meta($lesson_id, $subject_key, true) : '';
+    $body = $lesson_id > 0 ? (string) get_post_meta($lesson_id, $body_key, true) : '';
+    if (trim($subject) === '') $subject = $defaults['subject'];
+    if (trim($body) === '') $body = $defaults['body'];
+
+    return [
+        'subject' => $subject,
+        'body' => $body,
+    ];
+}
+
+function cl_replace_exam_email_placeholders($template, $placeholders) {
+    $template = (string) $template;
+    if ($template === '') return '';
+    $replace = [];
+    foreach ((array)$placeholders as $k => $v) {
+        $replace['{' . $k . '}'] = (string) $v;
+    }
+    return strtr($template, $replace);
+}
+
+function cl_send_exam_result_email($attempt_id, $result_type = 'approved', $admin_note = '') {
+    $attempt_id = absint($attempt_id);
+    if (!$attempt_id || get_post_type($attempt_id) !== 'cl-exam-attempt') return false;
+
+    $result_type = $result_type === 'approved' ? 'approved' : 'revoked';
+    $course_id = (int) get_post_meta($attempt_id, '_cl_course_id', true);
+    $lesson_id = (int) get_post_meta($attempt_id, '_cl_lesson_id', true);
+    $user_id = (int) get_post_meta($attempt_id, '_cl_user_id', true);
+    if (!$user_id) return false;
+
+    $user = get_user_by('id', $user_id);
+    if (!$user || empty($user->user_email)) return false;
+
+    $course = $course_id > 0 ? get_post($course_id) : null;
+    $lesson = $lesson_id > 0 ? get_post($lesson_id) : null;
+    $course_name = $course ? (string) $course->post_title : ('Curso ' . $course_id);
+    $lesson_name = $lesson ? (string) $lesson->post_title : ('Lección ' . $lesson_id);
+
+    $grade_data = cl_get_exam_attempt_grade_data($attempt_id);
+    $grade_txt = (is_array($grade_data) && is_numeric($grade_data['grade'])) ? cl_format_grade_value($grade_data['grade']) : '-';
+    $max_txt = (is_array($grade_data) && is_numeric($grade_data['max_grade'])) ? cl_format_grade_value($grade_data['max_grade']) : '-';
+
+    $status = (string) get_post_meta($attempt_id, '_cl_status', true);
+    $status_label = cl_get_exam_attempt_status_label($status);
+    $action_message = '';
+    if ($status === 'revoked_reset_course') {
+        $action_message = 'Debes repetir el curso desde cero.';
+    } elseif ($status === 'retry_required') {
+        $action_message = 'Debes repetir el examen.';
+    } elseif ($result_type === 'approved') {
+        $action_message = 'Enhorabuena, has superado el examen.';
+    } else {
+        $action_message = 'Debes repetir el examen.';
+    }
+
+    $admin_note = trim(wp_strip_all_tags((string) $admin_note));
+    $admin_note_text = $admin_note !== '' ? "Nota del profesor:\n{$admin_note}" : 'Sin observaciones del profesor.';
+    $course_url = $course_id > 0 ? get_permalink($course_id) : '';
+
+    $template = cl_get_exam_email_template($lesson_id, $result_type);
+    $placeholders = [
+        'student_name' => (string) ($user->display_name ?: $user->user_login),
+        'course_name' => $course_name,
+        'lesson_name' => $lesson_name,
+        'grade' => $grade_txt,
+        'max_grade' => $max_txt,
+        'status' => $status_label,
+        'action_message' => $action_message,
+        'admin_note' => $admin_note_text,
+        'course_url' => (string) $course_url,
+    ];
+
+    $subject = trim(cl_replace_exam_email_placeholders($template['subject'], $placeholders));
+    $message = trim(cl_replace_exam_email_placeholders($template['body'], $placeholders));
+    if ($subject === '') $subject = cl_get_exam_email_default_templates($result_type)['subject'];
+    if ($message === '') $message = cl_get_exam_email_default_templates($result_type)['body'];
+
+    return wp_mail($user->user_email, $subject, $message);
 }
 
 /* =====================================================
@@ -331,7 +444,21 @@ function cl_get_lecciones_ordenadas($curso_id){
     ]);
 }
 
-function cl_get_courses_exams_relation($args = []) {
+function cl_get_exam_attempt_status_label($status) {
+    $status = sanitize_key((string)$status);
+    $labels = [
+        'pending_review' => 'Pendiente de revisión',
+        'approved' => 'Aprobado',
+        'auto_approved' => 'Aprobado (auto)',
+        'retry_required' => 'Revocado (repetir examen)',
+        'revoked_reset_course' => 'Revocado (reiniciar curso)',
+    ];
+    if (isset($labels[$status])) return $labels[$status];
+    if ($status === '') return 'Desconocido';
+    return ucfirst(str_replace('_', ' ', $status));
+}
+
+function cl_get_courses_exams_relation_data($args = []) {
     $defaults = [
         'post_status' => 'publish',
         'numberposts' => -1,
@@ -378,6 +505,312 @@ function cl_get_courses_exams_relation($args = []) {
     }
 
     return $rows;
+}
+
+function cl_process_courses_exams_relation_actions($user_id) {
+    $notices = [];
+    $user_id = absint($user_id);
+    if (!$user_id) return $notices;
+
+    if (!empty($_GET['cl_delete_exam_attempt'])) {
+        $attempt_id = absint($_GET['cl_delete_exam_attempt']);
+        $nonce = isset($_GET['_cl_del_nonce']) ? sanitize_text_field(wp_unslash($_GET['_cl_del_nonce'])) : '';
+        if ($attempt_id > 0 && wp_verify_nonce($nonce, 'cl_delete_exam_attempt_' . $attempt_id)) {
+            $attempt_user_id = (int) get_post_meta($attempt_id, '_cl_user_id', true);
+            $can_delete = current_user_can('manage_options') || $attempt_user_id === $user_id;
+            if ($can_delete && get_post_type($attempt_id) === 'cl-exam-attempt') {
+                wp_delete_post($attempt_id, true);
+                $notices[] = ['type' => 'success', 'text' => 'Examen eliminado correctamente.'];
+            } else {
+                $notices[] = ['type' => 'warning', 'text' => 'No tienes permisos para eliminar este examen.'];
+            }
+        }
+    }
+
+    if (!empty($_GET['cl_cancel_pending_course'])) {
+        $course_id = absint($_GET['cl_cancel_pending_course']);
+        $nonce = isset($_GET['_cl_pending_nonce']) ? sanitize_text_field(wp_unslash($_GET['_cl_pending_nonce'])) : '';
+        if ($course_id > 0 && wp_verify_nonce($nonce, 'cl_cancel_pending_course_' . $course_id)) {
+            if (cl_is_course_pending_for_user($user_id, $course_id)) {
+                cl_remove_user_pending_enrollments($user_id, [$course_id]);
+                $notices[] = ['type' => 'success', 'text' => 'Solicitud de inscripción cancelada.'];
+            } else {
+                $notices[] = ['type' => 'warning', 'text' => 'La solicitud ya no estaba pendiente.'];
+            }
+        }
+    }
+
+    return $notices;
+}
+
+function cl_get_courses_exams_relation($args = []) {
+    $defaults = [
+        'post_status' => 'publish',
+        'numberposts' => -1,
+        'orderby' => 'title',
+        'order' => 'ASC',
+        'format' => 'html', // html | array
+        'user_id' => get_current_user_id(),
+        'attempts_numberposts' => 100,
+        'show_notices' => true,
+    ];
+    $args = wp_parse_args((array)$args, $defaults);
+
+    if (($args['format'] ?? 'html') === 'array') {
+        return cl_get_courses_exams_relation_data($args);
+    }
+
+    $user_id = absint($args['user_id']);
+    if (!$user_id) return '<div class="cl-no-access">Debes iniciar sesión.</div>';
+
+    $notices = !empty($args['show_notices']) ? cl_process_courses_exams_relation_actions($user_id) : [];
+
+    $courses = get_posts([
+        'post_type' => 'curso-cie',
+        'post_status' => $args['post_status'],
+        'numberposts' => (int) $args['numberposts'],
+        'orderby' => $args['orderby'],
+        'order' => $args['order'],
+    ]);
+
+    $course_rows = [];
+    foreach ($courses as $course) {
+        $summary = cl_get_course_user_summary($user_id, $course->ID);
+        $is_related = !empty($summary['is_enrolled'])
+            || !empty($summary['is_pending'])
+            || !empty($summary['started'])
+            || !empty($summary['approved'])
+            || !empty($summary['is_completed'])
+            || (int)($summary['completed_lessons'] ?? 0) > 0;
+        if (!$is_related) continue;
+
+        $completed_ids = array_map('absint', (array)($summary['completed_lesson_ids'] ?? []));
+        $lesson_times = (array)($summary['lesson_times'] ?? []);
+        $lesson_lines = [];
+        foreach (cl_get_lecciones_ordenadas($course->ID) as $lesson) {
+            $lid = (int) $lesson->ID;
+            $done = in_array($lid, $completed_ids, true);
+            $time_txt = isset($lesson_times[$lid]) ? gmdate('H:i:s', max(0, (int)$lesson_times[$lid])) : '-';
+            $state = $done ? '<span class="state-complete">Completada</span>' : '<span class="state-progress">En progreso</span>';
+            $lesson_lines[] = $state . ' (' . esc_html($time_txt) . ') ' . esc_html($lesson->post_title);
+        }
+
+        $action_html = cl_get_course_action_html_from_summary($summary, $course->ID, [
+            'show_enroll_button' => false,
+            'show_pending_label' => true,
+            'show_start_button' => true,
+            'show_continue_link' => true,
+            'start_button_id' => '',
+        ]);
+
+        $course_rows[] = [
+            'course' => $course,
+            'summary' => $summary,
+            'lesson_lines' => $lesson_lines,
+            'action_html' => $action_html !== '' ? $action_html : '-',
+        ];
+    }
+
+    $attempts = get_posts([
+        'post_type' => 'cl-exam-attempt',
+        'numberposts' => max(1, (int) $args['attempts_numberposts']),
+        'orderby' => 'date',
+        'order' => 'DESC',
+        'meta_query' => [
+            [
+                'key' => '_cl_user_id',
+                'value' => (string) $user_id,
+                'compare' => '=',
+            ],
+        ],
+    ]);
+
+    $exam_rows = [];
+    foreach ($attempts as $attempt) {
+        $attempt_id = (int) $attempt->ID;
+        $course_id = (int) get_post_meta($attempt_id, '_cl_course_id', true);
+        $lesson_id = (int) get_post_meta($attempt_id, '_cl_lesson_id', true);
+
+        if ($course_id <= 0 && $lesson_id > 0) {
+            $course_id = (int) get_post_field('post_parent', $lesson_id);
+        }
+
+        $course = $course_id > 0 ? get_post($course_id) : null;
+        $lesson = $lesson_id > 0 ? get_post($lesson_id) : null;
+        $status = (string) get_post_meta($attempt_id, '_cl_status', true);
+        $grade_data = cl_get_exam_attempt_grade_data($attempt_id);
+        $grade_txt = '-';
+        if (is_array($grade_data) && is_numeric($grade_data['grade'])) {
+            $grade_txt = cl_format_grade_value($grade_data['grade']) . ' / ' . cl_format_grade_value($grade_data['max_grade']);
+        }
+        $submitted = (string) get_post_meta($attempt_id, '_cl_submitted_at', true);
+        if ($submitted === '') {
+            $submitted = get_the_date('Y-m-d H:i', $attempt);
+        }
+
+        $review_url = '';
+        if (current_user_can('manage_options')) {
+            $review_url = admin_url('admin.php?page=cl_examenes&attempt=' . $attempt_id);
+        } elseif ($course_id > 0) {
+            $course_url = get_permalink($course_id);
+            if ($course_url) $review_url = add_query_arg('show-lecciones', '1', $course_url);
+        }
+
+        $delete_url = wp_nonce_url(
+            add_query_arg(['cl_delete_exam_attempt' => $attempt_id]),
+            'cl_delete_exam_attempt_' . $attempt_id,
+            '_cl_del_nonce'
+        );
+
+        $actions = [];
+        if ($review_url !== '') {
+            $actions[] = '<a class="button button-primary" href="' . esc_url($review_url) . '">Revisar</a>';
+        }
+        $actions[] = '<a class="button button-secondary" href="' . esc_url($delete_url) . '" onclick="return confirm(\'¿Seguro que quieres eliminar este examen?\')">Eliminar</a>';
+
+        $exam_rows[] = [
+            'course' => $course,
+            'lesson' => $lesson,
+            'submitted' => $submitted,
+            'grade_txt' => $grade_txt,
+            'status' => $status,
+            'actions' => implode(' ', $actions),
+        ];
+    }
+
+    $pending_rows = [];
+    $pending_ids = cl_get_user_pending_enrollments($user_id);
+    $pending_dates = cl_get_user_pending_enrollments_dates($user_id);
+    foreach ($pending_ids as $cid) {
+        $course = get_post($cid);
+        if (!$course || $course->post_type !== 'curso-cie') continue;
+        $ts = isset($pending_dates[$cid]) ? absint($pending_dates[$cid]) : 0;
+        $date_txt = $ts > 0 ? date_i18n('Y-m-d H:i', $ts) : '-';
+        $cancel_url = wp_nonce_url(
+            add_query_arg(['cl_cancel_pending_course' => $cid]),
+            'cl_cancel_pending_course_' . $cid,
+            '_cl_pending_nonce'
+        );
+        $pending_rows[] = [
+            'course' => $course,
+            'date' => $date_txt,
+            'actions' => '<a class="button button-secondary" href="' . esc_url($cancel_url) . '" onclick="return confirm(\'¿Cancelar solicitud de inscripción?\')">Cancelar</a>',
+        ];
+    }
+
+    ob_start();
+    ?>
+    <div class="cl-courses-exams-relation">
+        <?php foreach ($notices as $notice): ?>
+            <?php $notice_class = $notice['type'] === 'success' ? 'updated' : 'notice notice-warning'; ?>
+            <div class="<?php echo esc_attr($notice_class); ?>"><p><?php echo esc_html($notice['text']); ?></p></div>
+        <?php endforeach; ?>
+
+        <h3>Progreso de cursos</h3>
+        <table class="widefat striped">
+            <thead>
+                <tr>
+                    <th>Nombre del curso</th>
+                    <th>Estado</th>
+                    <th>Lecciones completadas</th>
+                    <th>Tiempo por lección</th>
+                    <th>Acciones</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php if (empty($course_rows)): ?>
+                    <tr><td colspan="5">No hay cursos con actividad.</td></tr>
+                <?php else: ?>
+                    <?php foreach ($course_rows as $row): ?>
+                        <?php
+                            $course = $row['course'];
+                            $summary = $row['summary'];
+                            $title = (string) $course->post_title;
+                            $url = get_permalink($course->ID);
+                            $course_link = $url ? '<a href="' . esc_url($url) . '">' . esc_html($title) . '</a>' : esc_html($title);
+                        ?>
+                        <tr>
+                            <td><?php echo $course_link; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?></td>
+                            <td><?php echo cl_get_course_state_html_from_summary($summary); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?></td>
+                            <td><?php echo esc_html((int)$summary['completed_lessons'] . '/' . (int)$summary['total_lessons']); ?></td>
+                            <td><?php echo !empty($row['lesson_lines']) ? implode('<br>', $row['lesson_lines']) : '-'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?></td>
+                            <td><?php echo $row['action_html']; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?></td>
+                        </tr>
+                    <?php endforeach; ?>
+                <?php endif; ?>
+            </tbody>
+        </table>
+
+        <h3 style="margin-top:22px;">Exámenes</h3>
+        <table class="widefat striped">
+            <thead>
+                <tr>
+                    <th>Nombre del curso</th>
+                    <th>Lección</th>
+                    <th>Fecha</th>
+                    <th>Nota</th>
+                    <th>Estado</th>
+                    <th>Acciones</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php if (empty($exam_rows)): ?>
+                    <tr><td colspan="6">No hay exámenes registrados.</td></tr>
+                <?php else: ?>
+                    <?php foreach ($exam_rows as $row): ?>
+                        <?php
+                            $course = $row['course'];
+                            $lesson = $row['lesson'];
+                            $course_title = $course ? (string) $course->post_title : '-';
+                            $lesson_title = $lesson ? (string) $lesson->post_title : '-';
+                            $course_url = ($course && $course->ID) ? get_permalink($course->ID) : '';
+                            $course_html = $course_url ? '<a href="' . esc_url($course_url) . '">' . esc_html($course_title) . '</a>' : esc_html($course_title);
+                        ?>
+                        <tr>
+                            <td><?php echo $course_html; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?></td>
+                            <td><?php echo esc_html($lesson_title); ?></td>
+                            <td><?php echo esc_html($row['submitted']); ?></td>
+                            <td><?php echo esc_html($row['grade_txt']); ?></td>
+                            <td><?php echo esc_html(cl_get_exam_attempt_status_label($row['status'])); ?></td>
+                            <td><?php echo $row['actions']; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?></td>
+                        </tr>
+                    <?php endforeach; ?>
+                <?php endif; ?>
+            </tbody>
+        </table>
+
+        <h3 style="margin-top:22px;">Inscripciones pendientes</h3>
+        <table class="widefat striped">
+            <thead>
+                <tr>
+                    <th>Nombre del curso</th>
+                    <th>Fecha</th>
+                    <th>Acciones</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php if (empty($pending_rows)): ?>
+                    <tr><td colspan="3">No tienes inscripciones pendientes.</td></tr>
+                <?php else: ?>
+                    <?php foreach ($pending_rows as $row): ?>
+                        <?php
+                            $course = $row['course'];
+                            $title = (string) $course->post_title;
+                            $url = get_permalink($course->ID);
+                            $course_html = $url ? '<a href="' . esc_url($url) . '">' . esc_html($title) . '</a>' : esc_html($title);
+                        ?>
+                        <tr>
+                            <td><?php echo $course_html; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?></td>
+                            <td><?php echo esc_html($row['date']); ?></td>
+                            <td><?php echo $row['actions']; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?></td>
+                        </tr>
+                    <?php endforeach; ?>
+                <?php endif; ?>
+            </tbody>
+        </table>
+    </div>
+    <?php
+    return ob_get_clean();
 }
 
 /* =====================================================
@@ -439,13 +872,45 @@ function cl_get_user_pending_enrollments($user_id) {
     return array_values(array_filter($ids));
 }
 
+function cl_get_user_pending_enrollments_dates($user_id) {
+    $user_id = absint($user_id);
+    if (!$user_id) return [];
+    $dates = get_user_meta($user_id, CL_USER_META_PENDING_ENROLLMENTS_DATES, true);
+    if (!is_array($dates)) $dates = [];
+    $out = [];
+    foreach ($dates as $course_id => $ts) {
+        $cid = absint($course_id);
+        $t = absint($ts);
+        if ($cid > 0 && $t > 0) {
+            $out[$cid] = $t;
+        }
+    }
+    return $out;
+}
+
 function cl_add_user_pending_enrollments($user_id, $course_ids) {
     $user_id = absint($user_id);
     if (!$user_id) return;
     $current = cl_get_user_pending_enrollments($user_id);
     $add = array_values(array_unique(array_filter(array_map('absint', (array)$course_ids))));
+    $newly_added = array_values(array_diff($add, $current));
     $merged = array_values(array_unique(array_merge($current, $add)));
     update_user_meta($user_id, CL_USER_META_PENDING_ENROLLMENTS, $merged);
+
+    $dates = cl_get_user_pending_enrollments_dates($user_id);
+    $now = time();
+    foreach ($newly_added as $cid) {
+        if (!isset($dates[$cid])) $dates[$cid] = $now;
+    }
+    foreach ($merged as $cid) {
+        if (!isset($dates[$cid])) $dates[$cid] = $now;
+    }
+    foreach (array_keys($dates) as $cid) {
+        if (!in_array((int) $cid, $merged, true)) {
+            unset($dates[$cid]);
+        }
+    }
+    update_user_meta($user_id, CL_USER_META_PENDING_ENROLLMENTS_DATES, $dates);
 }
 
 function cl_remove_user_pending_enrollments($user_id, $course_ids) {
@@ -456,6 +921,17 @@ function cl_remove_user_pending_enrollments($user_id, $course_ids) {
     if (empty($remove)) return;
     $new = array_values(array_diff($current, $remove));
     update_user_meta($user_id, CL_USER_META_PENDING_ENROLLMENTS, $new);
+
+    $dates = cl_get_user_pending_enrollments_dates($user_id);
+    foreach ($remove as $cid) {
+        unset($dates[$cid]);
+    }
+    foreach (array_keys($dates) as $cid) {
+        if (!in_array((int) $cid, $new, true)) {
+            unset($dates[$cid]);
+        }
+    }
+    update_user_meta($user_id, CL_USER_META_PENDING_ENROLLMENTS_DATES, $dates);
 }
 
 function cl_is_course_pending_for_user($user_id, $curso_id) {
@@ -476,6 +952,8 @@ function cl_get_course_user_summary($user_id, $curso_id) {
         'started' => false,
         'total_lessons' => 0,
         'completed_lessons' => 0,
+        'completed_lesson_ids' => [],
+        'lesson_times' => [],
         'progress_percent' => 0,
         'has_exam' => false,
         'approved' => false,
@@ -510,12 +988,34 @@ function cl_get_course_user_summary($user_id, $curso_id) {
     } else {
         $completadas = [];
     }
+    $summary['completed_lesson_ids'] = $completadas;
+
+    $tiempos = get_user_meta($user_id, "cl_curso_{$curso_id}_tiempos", true);
+    if (!is_array($tiempos)) $tiempos = [];
+    $clean_times = [];
+    foreach ($lesson_ids as $lid) {
+        if (!isset($tiempos[$lid])) continue;
+        $sec = max(0, (int) $tiempos[$lid]);
+        if ($sec <= 0) continue;
+        $clean_times[(int)$lid] = $sec;
+    }
+    $summary['lesson_times'] = $clean_times;
 
     $summary['completed_lessons'] = count($completadas);
     if ($summary['total_lessons'] > 0) {
         $summary['progress_percent'] = (int) round(($summary['completed_lessons'] / $summary['total_lessons']) * 100);
     }
     $summary['approved'] = ((int) get_user_meta($user_id, "cl_curso_{$curso_id}_aprobado", true)) === 1;
+    if (
+        empty($summary['started']) &&
+        (
+            $summary['completed_lessons'] > 0 ||
+            !empty($summary['lesson_times']) ||
+            !empty($summary['approved'])
+        )
+    ) {
+        $summary['started'] = true;
+    }
     $summary['all_lessons_done'] = $summary['total_lessons'] > 0 && $summary['completed_lessons'] >= $summary['total_lessons'];
     $summary['is_completed'] = $summary['all_lessons_done'] && (!$summary['has_exam'] || $summary['approved']);
 
@@ -969,6 +1469,8 @@ function cl_render_leccion_examen_metabox($post) {
     $exam_max_grade = cl_get_exam_max_grade($post->ID);
     $show_correct_answers = get_post_meta($post->ID, '_cl_exam_show_correct_answers', true);
     if ($show_correct_answers === '') $show_correct_answers = '1'; // Por defecto mostrar
+    $email_tpl_approved = cl_get_exam_email_template($post->ID, 'approved');
+    $email_tpl_revoked = cl_get_exam_email_template($post->ID, 'revoked');
 
     wp_nonce_field('cl_leccion_examen_save', 'cl_leccion_examen_nonce');
     ?>
@@ -991,6 +1493,30 @@ function cl_render_leccion_examen_metabox($post) {
                 <strong>Mostrar respuestas correctas al estudiante</strong>
             </label>
             <span class="description" style="display:block; margin-left:22px;">Si está marcado, el estudiante podrá ver las respuestas correctas después de aprobar el examen.</span>
+        </p>
+
+        <hr />
+        <h3 style="margin:0 0 10px;">Plantillas de email al alumno</h3>
+        <p class="description" style="margin-top:0;">
+            Variables disponibles: <code>{student_name}</code>, <code>{course_name}</code>, <code>{lesson_name}</code>, <code>{grade}</code>, <code>{max_grade}</code>, <code>{status}</code>, <code>{action_message}</code>, <code>{admin_note}</code>, <code>{course_url}</code>.
+        </p>
+
+        <p>
+            <label style="display:block; font-weight:600; margin-bottom:6px;">Asunto (aprobado)</label>
+            <input type="text" name="cl_exam_email_approved_subject" value="<?php echo esc_attr((string) ($email_tpl_approved['subject'] ?? '')); ?>" style="width:100%;" />
+        </p>
+        <p>
+            <label style="display:block; font-weight:600; margin-bottom:6px;">Mensaje (aprobado)</label>
+            <textarea name="cl_exam_email_approved_body" rows="6" style="width:100%;"><?php echo esc_textarea((string) ($email_tpl_approved['body'] ?? '')); ?></textarea>
+        </p>
+
+        <p>
+            <label style="display:block; font-weight:600; margin-bottom:6px;">Asunto (suspendido/revocado)</label>
+            <input type="text" name="cl_exam_email_revoked_subject" value="<?php echo esc_attr((string) ($email_tpl_revoked['subject'] ?? '')); ?>" style="width:100%;" />
+        </p>
+        <p>
+            <label style="display:block; font-weight:600; margin-bottom:6px;">Mensaje (suspendido/revocado)</label>
+            <textarea name="cl_exam_email_revoked_body" rows="6" style="width:100%;"><?php echo esc_textarea((string) ($email_tpl_revoked['body'] ?? '')); ?></textarea>
         </p>
 
         <p class="description">
@@ -1051,6 +1577,21 @@ add_action('save_post_lecciones-cie', function($post_id) {
         // Guardar opción de mostrar respuestas correctas
         $show_correct_answers = isset($_POST['cl_exam_show_correct_answers']) ? '1' : '0';
         update_post_meta($post_id, '_cl_exam_show_correct_answers', $show_correct_answers);
+
+        // Guardar plantillas de email del resultado (aprobado/suspendido)
+        $approved_subject = isset($_POST['cl_exam_email_approved_subject']) ? sanitize_text_field(wp_unslash($_POST['cl_exam_email_approved_subject'])) : '';
+        $approved_body = isset($_POST['cl_exam_email_approved_body']) ? sanitize_textarea_field(wp_unslash($_POST['cl_exam_email_approved_body'])) : '';
+        $revoked_subject = isset($_POST['cl_exam_email_revoked_subject']) ? sanitize_text_field(wp_unslash($_POST['cl_exam_email_revoked_subject'])) : '';
+        $revoked_body = isset($_POST['cl_exam_email_revoked_body']) ? sanitize_textarea_field(wp_unslash($_POST['cl_exam_email_revoked_body'])) : '';
+
+        if ($approved_subject === '') delete_post_meta($post_id, CL_META_EXAM_EMAIL_APPROVED_SUBJECT);
+        else update_post_meta($post_id, CL_META_EXAM_EMAIL_APPROVED_SUBJECT, $approved_subject);
+        if ($approved_body === '') delete_post_meta($post_id, CL_META_EXAM_EMAIL_APPROVED_BODY);
+        else update_post_meta($post_id, CL_META_EXAM_EMAIL_APPROVED_BODY, $approved_body);
+        if ($revoked_subject === '') delete_post_meta($post_id, CL_META_EXAM_EMAIL_REVOKED_SUBJECT);
+        else update_post_meta($post_id, CL_META_EXAM_EMAIL_REVOKED_SUBJECT, $revoked_subject);
+        if ($revoked_body === '') delete_post_meta($post_id, CL_META_EXAM_EMAIL_REVOKED_BODY);
+        else update_post_meta($post_id, CL_META_EXAM_EMAIL_REVOKED_BODY, $revoked_body);
 
         // Solo guardar definición si la lección es de tipo examen
         if (cl_get_leccion_tipo($post_id) === 'examen') {
@@ -1986,6 +2527,7 @@ add_action('wp_ajax_cl_submit_exam', function() {
         update_post_meta($attempt_id, '_cl_final_points', (float) ($auto['earned_points'] ?? 0));
         update_post_meta($attempt_id, '_cl_final_breakdown', $auto['breakdown'] ?? []);
         cl_mark_course_approved($user_id, $curso_id, $leccion_id);
+        cl_send_exam_result_email($attempt_id, 'approved', '');
     }
 
     cl_notify_admin_exam_submitted($attempt_id);
@@ -2279,52 +2821,74 @@ add_action('admin_menu', function(){
 });
 
 function cl_render_progreso_usuarios(){
+    if (!current_user_can('manage_options')) return;
+
+    $notice_html = '';
+    if (!empty($_POST['cl_borrar_usuario']) && !empty($_POST['cl_borrar_curso'])) {
+        $uid = absint($_POST['cl_borrar_usuario']);
+        $cid = absint($_POST['cl_borrar_curso']);
+        if (
+            $uid > 0 &&
+            $cid > 0 &&
+            isset($_POST['cl_progress_nonce']) &&
+            wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['cl_progress_nonce'])), 'cl_delete_progress_' . $uid . '_' . $cid)
+        ) {
+            delete_user_meta($uid, "cl_curso_{$cid}_completadas");
+            delete_user_meta($uid, "cl_curso_{$cid}_actual");
+            delete_user_meta($uid, "cl_curso_{$cid}_tiempos");
+            delete_user_meta($uid, "cl_curso_{$cid}_aprobado");
+            delete_user_meta($uid, cl_course_started_meta_key($cid));
+
+            // Borrar histórico
+            global $wpdb;
+            $table = cl_get_hist_table_name();
+            $wpdb->query($wpdb->prepare("DELETE FROM {$table} WHERE user_id = %d AND curso_id = %d", $uid, $cid));
+            $notice_html = '<div class="notice notice-success"><p>Progreso borrado correctamente.</p></div>';
+        }
+    }
+
     $cursos = get_posts(['post_type'=>'curso-cie','numberposts'=>-1]);
     $usuarios = get_users(['role__in'=>['cie_new_user','cie_user']]);
 
     echo '<div class="wrap"><h1>Progreso de usuarios</h1>';
+    echo $notice_html; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
 
     foreach($cursos as $curso){
+        $lecciones = cl_get_lecciones_ordenadas($curso->ID);
         echo '<h2>'.esc_html($curso->post_title).'</h2>';
         echo '<table class="widefat striped"><thead><tr>
                 <th>Usuario</th><th>Estado</th><th>Lecciones completadas</th><th>Tiempo por lección</th><th>Acciones</th>
               </tr></thead><tbody>';
 
         foreach($usuarios as $user){
-            $completadas = get_user_meta($user->ID,"cl_curso_{$curso->ID}_completadas",true);
-            $tiempos = get_user_meta($user->ID,"cl_curso_{$curso->ID}_tiempos",true);
-            if(!is_array($completadas)) $completadas=[];
-            if(!is_array($tiempos)) $tiempos=[];
+            $summary = cl_get_course_user_summary($user->ID, $curso->ID);
+            $has_activity = !empty($summary['started'])
+                || (int)($summary['completed_lessons'] ?? 0) > 0
+                || !empty($summary['approved'])
+                || !empty($summary['lesson_times']);
+            if (!$has_activity) continue;
 
-            $started = cl_has_user_started_course($user->ID, $curso->ID);
-            if(!$started && empty($completadas)) continue;
-
-            $lecciones = cl_get_lecciones_ordenadas($curso->ID);
+            $completadas = array_map('absint', (array)($summary['completed_lesson_ids'] ?? []));
+            $tiempos = (array)($summary['lesson_times'] ?? []);
             $lecciones_text=[];
             foreach($lecciones as $l){
                 $estado = in_array($l->ID,$completadas)?'<span class="state-complete">Completada</span>':'<span class="state-progress">En progreso</span>';
-                $tiempo = isset($tiempos[$l->ID])?gmdate("H:i:s",$tiempos[$l->ID]):'-';
-                $lecciones_text[] = "$estado ($tiempo) ".$l->post_title;
+                $tiempo = isset($tiempos[$l->ID]) ? gmdate("H:i:s", max(0, (int)$tiempos[$l->ID])) : '-';
+                $lecciones_text[] = $estado . ' (' . esc_html($tiempo) . ') ' . esc_html($l->post_title);
             }
 
-            $estado_curso_html = '';
-            if(!$started){
-                $estado_curso_html = '<span class="state-no-init">No iniciado</span>';
-            } elseif(count($completadas) === 0){
-                $estado_curso_html = '<span class="state-progress">Curso iniciado</span>';
-            } else {
-                $estado_curso_html = '<span class="state-progress">En progreso</span>';
-            }
+            $estado_curso_html = cl_get_course_state_html_from_summary($summary);
 
             echo '<tr>';
             echo '<td>'.esc_html($user->display_name).' ('.esc_html($user->user_login).')</td>';
             echo '<td>'.$estado_curso_html.'</td>';
-            echo '<td>'.count($completadas).'/'.count($lecciones).'</td>';
+            echo '<td>'.esc_html((int)($summary['completed_lessons'] ?? 0).'/'.(int)($summary['total_lessons'] ?? 0)).'</td>';
             echo '<td>'.implode('<br>',$lecciones_text).'</td>';
             echo '<td>
                     <form method="post" style="display:inline">
                         <input type="hidden" name="cl_borrar_usuario" value="'.esc_attr($user->ID).'">
                         <input type="hidden" name="cl_borrar_curso" value="'.esc_attr($curso->ID).'">
+                        '.wp_nonce_field('cl_delete_progress_' . absint($user->ID) . '_' . absint($curso->ID), 'cl_progress_nonce', true, false).'
                         <button type="submit" class="button button-secondary" onclick="return confirm(\'¿Seguro que quieres borrar el progreso?\')">Borrar progreso</button>
                     </form>
                   </td>';
@@ -2335,49 +2899,60 @@ function cl_render_progreso_usuarios(){
     }
 
     echo '</div>';
-
-    if(!empty($_POST['cl_borrar_usuario']) && !empty($_POST['cl_borrar_curso'])){
-        $uid = intval($_POST['cl_borrar_usuario']);
-        $cid = intval($_POST['cl_borrar_curso']);
-        delete_user_meta($uid,"cl_curso_{$cid}_completadas");
-        delete_user_meta($uid,"cl_curso_{$cid}_actual");
-        delete_user_meta($uid,"cl_curso_{$cid}_tiempos");
-        delete_user_meta($uid,"cl_curso_{$cid}_aprobado");
-        delete_user_meta($uid, cl_course_started_meta_key($cid));
-
-        // Borrar histórico
-        global $wpdb;
-        $table = cl_get_hist_table_name();
-        $wpdb->query($wpdb->prepare("DELETE FROM {$table} WHERE user_id = %d AND curso_id = %d", $uid, $cid));
-        echo '<div class="notice notice-success"><p>Progreso borrado correctamente.</p></div>';
-        echo '<meta http-equiv="refresh" content="1">';
-    }
 }
 
 /* =====================================================
    ADMIN: EXÁMENES (revisión / aprobación / revocación)
 ===================================================== */
 function cl_render_examenes_admin() {
-    
-    // Procesar eliminación
-    if (
-        isset($_GET['cl_delete_attempt']) &&
-        isset($_GET['_wpnonce']) &&
-        wp_verify_nonce($_GET['_wpnonce'], 'cl_delete_attempt')
-    ) {
-        $delete_id = absint($_GET['cl_delete_attempt']);
+    if (!current_user_can('manage_options')) return;
 
-        if (current_user_can('manage_options') && get_post_type($delete_id) === 'cl-exam-attempt') {
+    $notices = [];
+
+    // Procesar eliminación individual
+    if (!empty($_GET['cl_delete_attempt']) && !empty($_GET['_wpnonce'])) {
+        $delete_id = absint($_GET['cl_delete_attempt']);
+        $nonce = sanitize_text_field(wp_unslash($_GET['_wpnonce']));
+        if ($delete_id > 0 && wp_verify_nonce($nonce, 'cl_delete_attempt') && get_post_type($delete_id) === 'cl-exam-attempt') {
             wp_delete_post($delete_id, true); // true = borrar definitivamente
-            echo '<div class="notice notice-success"><p>Examen eliminado correctamente.</p></div>';
+            $notices[] = ['type' => 'success', 'text' => 'Examen eliminado correctamente.'];
         }
     }
 
-    if (!current_user_can('manage_options')) return;
+    // Procesar eliminación en lote
+    if (
+        (!empty($_POST['cl_bulk_action']) || !empty($_POST['cl_bulk_action_bottom'])) &&
+        isset($_POST['cl_exams_bulk_nonce']) &&
+        wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['cl_exams_bulk_nonce'])), 'cl_exams_bulk_action')
+    ) {
+        $bulk_action = sanitize_text_field(wp_unslash($_POST['cl_bulk_action']));
+        if ($bulk_action === '' && !empty($_POST['cl_bulk_action_bottom'])) {
+            $bulk_action = sanitize_text_field(wp_unslash($_POST['cl_bulk_action_bottom']));
+        }
+        $ids = isset($_POST['cl_attempt_ids']) ? (array) $_POST['cl_attempt_ids'] : [];
+        $ids = array_values(array_unique(array_filter(array_map('absint', $ids))));
+
+        if ($bulk_action === 'delete') {
+            if (empty($ids)) {
+                $notices[] = ['type' => 'warning', 'text' => 'Selecciona al menos un examen para eliminar.'];
+            } else {
+                $deleted = 0;
+                foreach ($ids as $id) {
+                    if (get_post_type($id) !== 'cl-exam-attempt') continue;
+                    if (wp_delete_post($id, true)) $deleted++;
+                }
+                $notices[] = ['type' => 'success', 'text' => sprintf('Se han eliminado %d exámenes.', (int)$deleted)];
+            }
+        }
+    }
 
     $attempt_id = isset($_GET['attempt']) ? absint($_GET['attempt']) : 0;
 
     echo '<div class="wrap"><h1>Exámenes</h1>';
+    foreach ($notices as $n) {
+        $class = $n['type'] === 'success' ? 'notice notice-success' : 'notice notice-warning';
+        echo '<div class="' . esc_attr($class) . '"><p>' . esc_html($n['text']) . '</p></div>';
+    }
 
     if ($attempt_id) {
         cl_render_examen_admin_detail($attempt_id);
@@ -2392,7 +2967,7 @@ function cl_render_examenes_admin() {
     echo '<p>';
     foreach ($allowed as $st) {
         $url = admin_url('admin.php?page=cl_examenes&status=' . urlencode($st));
-        $label = ucfirst(str_replace('_', ' ', $st));
+        $label = cl_get_exam_attempt_status_label($st);
         $active = $st === $status ? ' style="font-weight:bold;"' : '';
         echo '<a href="' . esc_url($url) . '"' . $active . '>' . esc_html($label) . '</a> ';
     }
@@ -2407,12 +2982,23 @@ function cl_render_examenes_admin() {
         'meta_value' => $status,
     ]);
 
+    echo '<form method="post">';
+    wp_nonce_field('cl_exams_bulk_action', 'cl_exams_bulk_nonce');
+    echo '<div class="tablenav top"><div class="alignleft actions">';
+    echo '<select name="cl_bulk_action">';
+    echo '<option value="">Acciones en lote</option>';
+    echo '<option value="delete">Eliminar</option>';
+    echo '</select> ';
+    echo '<button type="submit" class="button action">Aplicar</button>';
+    echo '</div></div>';
+
     echo '<table class="widefat striped"><thead><tr>';
+    echo '<td class="manage-column column-cb check-column"><input type="checkbox" id="cl-select-all-attempts" /></td>';
     echo '<th>Alumno</th><th>Curso</th><th>Lección</th><th>Fecha</th><th>Nota</th><th>Estado</th><th>Acción</th>';
     echo '</tr></thead><tbody>';
 
     if (empty($attempts)) {
-        echo '<tr><td colspan="7">No hay exámenes para este filtro.</td></tr>';
+        echo '<tr><td colspan="8">No hay exámenes para este filtro.</td></tr>';
     } else {
         foreach ($attempts as $a) {
             $curso_id = (int)get_post_meta($a->ID, '_cl_course_id', true);
@@ -2432,31 +3018,59 @@ function cl_render_examenes_admin() {
 
             $url = admin_url('admin.php?page=cl_examenes&attempt=' . absint($a->ID));
             echo '<tr>';
+            echo '<th scope="row" class="check-column"><input type="checkbox" class="cl-attempt-checkbox" name="cl_attempt_ids[]" value="' . esc_attr($a->ID) . '" /></th>';
             echo '<td>' . esc_html($user ? $user->display_name : ('Usuario ' . $user_id)) . '</td>';
             echo '<td>' . esc_html($curso ? $curso->post_title : $curso_id) . '</td>';
             echo '<td>' . esc_html($leccion ? $leccion->post_title : $leccion_id) . '</td>';
             echo '<td>' . esc_html($submitted ?: get_the_date('Y-m-d H:i', $a)) . '</td>';
             echo '<td>' . esc_html(is_numeric($grade) ? (round((float)$grade, 2) . ' / ' . round((float)$max_grade, 2)) : '-') . '</td>';
-            echo '<td>' . esc_html($st) . '</td>';
-            //echo '<td><a class="button button-primary" href="' . esc_url($url) . '">Revisar</a></td>';
-            
-            $delete_url = wp_nonce_url(
-    admin_url('admin.php?page=cl_examenes&cl_delete_attempt=' . absint($a->ID)),
-    'cl_delete_attempt'
-);
+            echo '<td>' . esc_html(cl_get_exam_attempt_status_label($st)) . '</td>';
 
-echo '<td>';
-echo '<a class="button button-primary" href="' . esc_url($url) . '">Revisar</a> ';
-echo '<a class="button button-secondary" 
-        href="' . esc_url($delete_url) . '" 
-        onclick="return confirm(\'¿Seguro que quieres eliminar este examen?\')">
-        Eliminar
-      </a>';
-echo '</td>';
+            $delete_url = wp_nonce_url(
+                admin_url('admin.php?page=cl_examenes&status=' . urlencode($status) . '&cl_delete_attempt=' . absint($a->ID)),
+                'cl_delete_attempt'
+            );
+
+            echo '<td>';
+            echo '<a class="button button-primary" href="' . esc_url($url) . '">Revisar</a> ';
+            echo '<a class="button button-secondary" href="' . esc_url($delete_url) . '" onclick="return confirm(\'¿Seguro que quieres eliminar este examen?\')">Eliminar</a>';
+            echo '</td>';
             echo '</tr>';
         }
     }
     echo '</tbody></table>';
+    echo '<div class="tablenav bottom"><div class="alignleft actions">';
+    echo '<select name="cl_bulk_action_bottom">';
+    echo '<option value="">Acciones en lote</option>';
+    echo '<option value="delete">Eliminar</option>';
+    echo '</select> ';
+    echo '<button type="button" class="button action" id="cl-apply-bottom-bulk">Aplicar</button>';
+    echo '</div></div>';
+    echo '</form>';
+    ?>
+    <script>
+        (function(){
+            var selectAll = document.getElementById('cl-select-all-attempts');
+            var checkboxes = document.querySelectorAll('.cl-attempt-checkbox');
+            if (selectAll) {
+                selectAll.addEventListener('change', function () {
+                    checkboxes.forEach(function (cb) { cb.checked = !!selectAll.checked; });
+                });
+            }
+            var bottomApply = document.getElementById('cl-apply-bottom-bulk');
+            if (bottomApply) {
+                bottomApply.addEventListener('click', function () {
+                    var bottomSelect = document.querySelector('select[name="cl_bulk_action_bottom"]');
+                    var topSelect = document.querySelector('select[name="cl_bulk_action"]');
+                    if (topSelect && bottomSelect) {
+                        topSelect.value = bottomSelect.value;
+                        topSelect.form.submit();
+                    }
+                });
+            }
+        })();
+    </script>
+    <?php
     echo '</div>';
 }
 
@@ -2536,6 +3150,7 @@ function cl_render_examen_admin_detail($attempt_id) {
             update_post_meta($attempt_id, '_cl_reviewed_by', get_current_user_id());
             update_post_meta($attempt_id, '_cl_reviewed_at', current_time('mysql'));
             cl_mark_course_approved($user_id, $curso_id, $leccion_id);
+            cl_send_exam_result_email($attempt_id, 'approved', $note);
 
             // Cambiar rol si es cie_new_user
             $user_obj = get_user_by('id', $user_id);
@@ -2552,7 +3167,7 @@ function cl_render_examen_admin_detail($attempt_id) {
             update_post_meta($attempt_id, '_cl_admin_note', $note);
             update_post_meta($attempt_id, '_cl_reviewed_by', get_current_user_id());
             update_post_meta($attempt_id, '_cl_reviewed_at', current_time('mysql'));
-            cl_revoke_exam_for_user($user_id, $curso_id, $leccion_id, false);
+            cl_revoke_exam_for_user($user_id, $curso_id, $leccion_id, false, $attempt_id, $note);
             echo '<div class="notice notice-warning"><p>Examen revocado. El alumno deberá repetir el examen.</p></div>';
             $status = 'retry_required';
         } elseif ($action === 'revoke_reset') {
@@ -2560,7 +3175,7 @@ function cl_render_examen_admin_detail($attempt_id) {
             update_post_meta($attempt_id, '_cl_admin_note', $note);
             update_post_meta($attempt_id, '_cl_reviewed_by', get_current_user_id());
             update_post_meta($attempt_id, '_cl_reviewed_at', current_time('mysql'));
-            cl_revoke_exam_for_user($user_id, $curso_id, $leccion_id, true);
+            cl_revoke_exam_for_user($user_id, $curso_id, $leccion_id, true, $attempt_id, $note);
             echo '<div class="notice notice-warning"><p>Examen revocado y curso reiniciado. El alumno deberá repetir el curso desde cero.</p></div>';
             $status = 'revoked_reset_course';
         }
@@ -2667,7 +3282,7 @@ function cl_mark_course_approved($user_id, $curso_id, $leccion_id) {
     update_user_meta($user_id, "cl_curso_{$curso_id}_aprobado", 1);
 }
 
-function cl_revoke_exam_for_user($user_id, $curso_id, $leccion_id, $reset_course) {
+function cl_revoke_exam_for_user($user_id, $curso_id, $leccion_id, $reset_course, $attempt_id = 0, $admin_note = '') {
     if ($reset_course) {
         delete_user_meta($user_id, "cl_curso_{$curso_id}_completadas");
         delete_user_meta($user_id, "cl_curso_{$curso_id}_actual");
@@ -2682,6 +3297,12 @@ function cl_revoke_exam_for_user($user_id, $curso_id, $leccion_id, $reset_course
         delete_user_meta($user_id, "cl_curso_{$curso_id}_aprobado");
     }
 
+    $attempt_id = absint($attempt_id);
+    if ($attempt_id > 0 && cl_send_exam_result_email($attempt_id, 'revoked', $admin_note)) {
+        return;
+    }
+
+    // Fallback legacy si no hay intento válido (compatibilidad).
     $user = get_user_by('id', $user_id);
     if ($user && !empty($user->user_email)) {
         $curso = get_post($curso_id);
@@ -2999,6 +3620,7 @@ function cl_render_nota_ultimo_examen_shortcode($atts = []) {
     $atts = shortcode_atts([
         'empty' => 'Sin exámenes finalizados.',
         'show_max' => '1',
+        'show_course' => '1',
     ], (array)$atts, 'cl_nota_ultimo_examen');
 
     $attempt = cl_get_latest_finished_exam_attempt_for_user(get_current_user_id());
@@ -3008,11 +3630,30 @@ function cl_render_nota_ultimo_examen_shortcode($atts = []) {
     if (!is_array($grade_data) || !is_numeric($grade_data['grade'])) return (string) $atts['empty'];
 
     $grade_txt = cl_format_grade_value($grade_data['grade']);
+    $output = $grade_txt;
     if (($atts['show_max'] ?? '1') === '1') {
         $max_txt = cl_format_grade_value($grade_data['max_grade']);
-        return $grade_txt . ' / ' . $max_txt;
+        $output = $grade_txt . ' / ' . $max_txt;
     }
-    return $grade_txt;
+
+    if (($atts['show_course'] ?? '1') === '1') {
+        $course_id = (int) get_post_meta($attempt->ID, '_cl_course_id', true);
+        if (!$course_id) {
+            $lesson_id = (int) get_post_meta($attempt->ID, '_cl_lesson_id', true);
+            if ($lesson_id > 0) {
+                $course_id = (int) get_post_field('post_parent', $lesson_id);
+            }
+        }
+        if ($course_id > 0) {
+            $course = get_post($course_id);
+            $course_url = get_permalink($course_id);
+            if ($course && $course_url) {
+                $output .= ' - <a href="' . esc_url($course_url) . '">' . esc_html($course->post_title) . '</a>';
+            }
+        }
+    }
+
+    return $output;
 }
 
 add_shortcode('cl_nota_ultimo_examen', 'cl_render_nota_ultimo_examen_shortcode');
