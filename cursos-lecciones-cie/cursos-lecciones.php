@@ -606,6 +606,7 @@ function cl_get_course_action_html_from_summary($summary, $curso_id, $args = [])
         if (empty($args['show_continue_link'])) return '';
         $course_url = get_permalink($curso_id);
         if (!$course_url) return '';
+
         if($summary['is_completed'] == 1) {
             return '<a class="cl-btn" href="' . esc_url($course_url) . '?show-lecciones=1">Ver curso</a>';
         }
@@ -3018,29 +3019,6 @@ add_shortcode('cl_nota_ultimo_examen', 'cl_render_nota_ultimo_examen_shortcode')
 add_shortcode('cl_nota_ultimo_examen_finalizado', 'cl_render_nota_ultimo_examen_shortcode');
 
 function cl_render_nota_curso_actual_shortcode($atts = []) {
-    /*if (!is_user_logged_in()) return 'Debes iniciar sesión.';
-    $atts = shortcode_atts([
-        'course_id' => 0,
-        'empty' => 'Sin examen finalizado en este curso.',
-        'show_max' => '1',
-    ], (array)$atts, 'cl_nota_curso_actual');
-
-    $curso_id = cl_get_course_id_from_context($atts);
-    if (!$curso_id) return '';
-
-    $attempt = cl_get_latest_finished_exam_attempt_for_user(get_current_user_id(), $curso_id);
-    if (!$attempt) return (string) $atts['empty'];
-
-    $grade_data = cl_get_exam_attempt_grade_data($attempt->ID);
-    if (!is_array($grade_data) || !is_numeric($grade_data['grade'])) return (string) $atts['empty'];
-
-    $grade_txt = cl_format_grade_value($grade_data['grade']);
-    if (($atts['show_max'] ?? '1') === '1') {
-        $max_txt = cl_format_grade_value($grade_data['max_grade']);
-        return $grade_txt . ' / ' . $max_txt;
-    }
-    return $grade_txt;*/
-
 
     if (!is_user_logged_in()) {
         return 'Debes iniciar sesión.';
@@ -3091,7 +3069,6 @@ return $grade_txt . ' / ' . $max_txt .
        ' – <a href="' . esc_url($course_url) . '">' .
        esc_html($course->post_title) .
        '</a>';
-
 }
 
 add_shortcode('cl_nota_curso_actual', 'cl_render_nota_curso_actual_shortcode');
