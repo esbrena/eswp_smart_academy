@@ -162,3 +162,21 @@ button.button-secondary:hover { background:#d32f2f; }
 .cl-exam-admin-score-input {
     flex-shrink: 0;
 }
+.cl-exam-admin-points, .cl-nota-final {
+    padding: 4px 16px;
+    border-radius: 999px;
+    background: #d9e9fa;
+    margin: 8px 0px;
+    color: #105dae;
+    display: inline-block;
+}
+.cl-nota-final {
+    font-size: 18px;
+    float: right;
+    margin-top: -160px;
+}
+.cl-bloque-nota {
+    width:100%;
+    display:block;
+    text-align: right;
+}

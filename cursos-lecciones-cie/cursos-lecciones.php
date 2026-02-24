@@ -606,7 +606,11 @@ function cl_get_course_action_html_from_summary($summary, $curso_id, $args = [])
         if (empty($args['show_continue_link'])) return '';
         $course_url = get_permalink($curso_id);
         if (!$course_url) return '';
-        return '<a class="cl-btn" href="' . esc_url($course_url) . '">Continuar curso</a>';
+
+        if($summary['is_completed'] == 1) {
+            return '<a class="cl-btn" href="' . esc_url($course_url) . '?show-lecciones=1">Ver curso</a>';
+        }
+        return '<a class="cl-btn" href="' . esc_url($course_url) . '?show-lecciones=1">Continuar curso</a>';
     }
 
     if (empty($args['show_start_button'])) return '';
@@ -881,7 +885,7 @@ function cl_render_leccion_video_frontend($leccion_id) {
         if (!$url) return '';
         $mime = get_post_mime_type($att_id);
         $type_attr = $mime ? ' type="' . esc_attr($mime) . '"' : '';
-        $html = '<video controls preload="metadata" style="max-width:100%; height:auto;">';
+        $html = '<video controls controlslist="nodownload noplaybackrate" disablepictureinpicture preload="metadata" style="max-width:100%; height:auto;">';
         $html .= '<source src="' . esc_url($url) . '"' . $type_attr . ' />';
         $html .= 'Tu navegador no soporta vídeo HTML5.';
         $html .= '</video>';
@@ -1491,7 +1495,12 @@ add_shortcode('cl_leccion_curso', function(){
 
             <?php if(!empty($disable_next_by_exam)): ?>
                 <div class="cl-exam-note">
-                    <strong>ℹ️ Información:</strong> Para avanzar a la siguiente lección, primero debes completar el examen y esperar a que sea evaluado por el profesor.
+                    <strong>ℹ️ Información:</strong> 
+                    <?php if($next_leccion) { ?>
+                    Para avanzar a la siguiente lección, primero debes completar el examen y esperar a que sea evaluado por el profesor.
+                    <?php } else { ?>
+                    Para terminar el curso, primero debes completar el examen y esperar a que sea evaluado por el profesor.       
+                   <?php } ?>     
                 </div>
             <?php endif; ?>
 
@@ -1518,7 +1527,7 @@ add_shortcode('cl_boton_comenzar_curso', function() {
         'show_enroll_button' => true,
         'show_pending_label' => true,
         'show_start_button' => true,
-        'show_continue_link' => false, // Mantener comportamiento histórico: ocultar al iniciar.
+        'show_continue_link' => true, // Mantener comportamiento histórico: ocultar al iniciar.
         'start_button_id' => 'cl-btn-start-course',
     ]);
 });
@@ -1573,7 +1582,7 @@ function cl_get_latest_finished_exam_attempt_for_user($user_id, $curso_id = 0) {
         ],
         [
             'key' => '_cl_status',
-            'value' => ['pending_review', 'approved', 'retry_required', 'revoked_reset_course'],
+            'value' => ['approved', 'auto_approved'],
             'compare' => 'IN',
         ],
     ];
@@ -2349,6 +2358,21 @@ function cl_render_progreso_usuarios(){
    ADMIN: EXÁMENES (revisión / aprobación / revocación)
 ===================================================== */
 function cl_render_examenes_admin() {
+    
+    // Procesar eliminación
+    if (
+        isset($_GET['cl_delete_attempt']) &&
+        isset($_GET['_wpnonce']) &&
+        wp_verify_nonce($_GET['_wpnonce'], 'cl_delete_attempt')
+    ) {
+        $delete_id = absint($_GET['cl_delete_attempt']);
+
+        if (current_user_can('manage_options') && get_post_type($delete_id) === 'cl-exam-attempt') {
+            wp_delete_post($delete_id, true); // true = borrar definitivamente
+            echo '<div class="notice notice-success"><p>Examen eliminado correctamente.</p></div>';
+        }
+    }
+
     if (!current_user_can('manage_options')) return;
 
     $attempt_id = isset($_GET['attempt']) ? absint($_GET['attempt']) : 0;
@@ -2414,7 +2438,21 @@ function cl_render_examenes_admin() {
             echo '<td>' . esc_html($submitted ?: get_the_date('Y-m-d H:i', $a)) . '</td>';
             echo '<td>' . esc_html(is_numeric($grade) ? (round((float)$grade, 2) . ' / ' . round((float)$max_grade, 2)) : '-') . '</td>';
             echo '<td>' . esc_html($st) . '</td>';
-            echo '<td><a class="button button-primary" href="' . esc_url($url) . '">Revisar</a></td>';
+            //echo '<td><a class="button button-primary" href="' . esc_url($url) . '">Revisar</a></td>';
+            
+            $delete_url = wp_nonce_url(
+    admin_url('admin.php?page=cl_examenes&cl_delete_attempt=' . absint($a->ID)),
+    'cl_delete_attempt'
+);
+
+echo '<td>';
+echo '<a class="button button-primary" href="' . esc_url($url) . '">Revisar</a> ';
+echo '<a class="button button-secondary" 
+        href="' . esc_url($delete_url) . '" 
+        onclick="return confirm(\'¿Seguro que quieres eliminar este examen?\')">
+        Eliminar
+      </a>';
+echo '</td>';
             echo '</tr>';
         }
     }
@@ -2498,6 +2536,15 @@ function cl_render_examen_admin_detail($attempt_id) {
             update_post_meta($attempt_id, '_cl_reviewed_by', get_current_user_id());
             update_post_meta($attempt_id, '_cl_reviewed_at', current_time('mysql'));
             cl_mark_course_approved($user_id, $curso_id, $leccion_id);
+
+            // Cambiar rol si es cie_new_user
+            $user_obj = get_user_by('id', $user_id);
+
+            if ($user_obj && in_array('cie_new_user', (array) $user_obj->roles, true)) {
+                $user_obj->remove_role('cie_new_user');
+                $user_obj->add_role('cie_user');
+            }
+
             echo '<div class="notice notice-success"><p>Examen aprobado y curso marcado como completado/aprobado.</p></div>';
             $status = 'approved';
         } elseif ($action === 'revoke_retry') {
@@ -2520,14 +2567,14 @@ function cl_render_examen_admin_detail($attempt_id) {
     }
 
     echo '<p><a href="' . esc_url(admin_url('admin.php?page=cl_examenes')) . '">← Volver a la lista</a></p>';
-    echo '<h2>Detalle del intento</h2>';
+    echo '<h2>Detalle del examen</h2>';
     echo '<p><strong>Alumno:</strong> ' . esc_html($user ? $user->display_name : ('Usuario ' . $user_id)) . '</p>';
     echo '<p><strong>Curso:</strong> ' . esc_html($curso ? $curso->post_title : $curso_id) . '</p>';
     echo '<p><strong>Lección:</strong> ' . esc_html($leccion ? $leccion->post_title : $leccion_id) . '</p>';
     echo '<p><strong>Estado:</strong> ' . esc_html($status) . '</p>';
     $max_grade = cl_get_exam_max_grade($leccion_id);
     $grade = is_numeric($final_grade) ? $final_grade : $auto_grade;
-    echo '<p><strong>Nota:</strong> ' . esc_html(is_numeric($grade) ? (round((float)$grade, 2) . ' / ' . $max_grade) : '-') . '</p>';
+    echo '<div class="cl-bloque-nota"><p class="cl-nota-final"><strong>Nota:</strong> ' . esc_html(is_numeric($grade) ? (round((float)$grade, 2) . ' / ' . $max_grade) : '-') . '</p></div>';
 
     echo '<h3>Respuestas del alumno</h3>';
     echo '<div class="cl-exam-admin-review">';
@@ -2736,7 +2783,7 @@ function cl_render_course_cards_inline($courses, $summary_map, $show_actions = f
                     $accion = cl_get_course_action_html_from_summary($summary, $cid, [
                         'show_enroll_button' => true,
                         'show_pending_label' => true,
-                        'show_start_button' => false, // El botón de comenzar se reserva para [cl_boton_comenzar_curso].
+                        'show_start_button' => false, // El botón de comenzar se reserva para [cl_boton_comenzar_curso]. OJO!!
                         'show_continue_link' => true,
                     ]);
                 }
@@ -2972,28 +3019,56 @@ add_shortcode('cl_nota_ultimo_examen', 'cl_render_nota_ultimo_examen_shortcode')
 add_shortcode('cl_nota_ultimo_examen_finalizado', 'cl_render_nota_ultimo_examen_shortcode');
 
 function cl_render_nota_curso_actual_shortcode($atts = []) {
-    if (!is_user_logged_in()) return 'Debes iniciar sesión.';
-    $atts = shortcode_atts([
-        'course_id' => 0,
-        'empty' => 'Sin examen finalizado en este curso.',
-        'show_max' => '1',
-    ], (array)$atts, 'cl_nota_curso_actual');
 
-    $curso_id = cl_get_course_id_from_context($atts);
-    if (!$curso_id) return '';
+    if (!is_user_logged_in()) {
+        return 'Debes iniciar sesión.';
+    }
 
-    $attempt = cl_get_latest_finished_exam_attempt_for_user(get_current_user_id(), $curso_id);
-    if (!$attempt) return (string) $atts['empty'];
+    $attempt = cl_get_latest_finished_exam_attempt_for_user(get_current_user_id());
+    if (!$attempt) {
+        return 'Sin exámenes finalizados.';
+    }
+
+    $status = get_post_meta($attempt->ID, '_cl_status', true);
+    if (!in_array($status, ['approved', 'auto_approved', 'finished'], true)) {
+        return 'Sin exámenes aprobados.';
+    }
 
     $grade_data = cl_get_exam_attempt_grade_data($attempt->ID);
-    if (!is_array($grade_data) || !is_numeric($grade_data['grade'])) return (string) $atts['empty'];
+    if (!is_array($grade_data) || !is_numeric($grade_data['grade'])) {
+        return 'Sin nota válida.';
+    }
 
     $grade_txt = cl_format_grade_value($grade_data['grade']);
-    if (($atts['show_max'] ?? '1') === '1') {
-        $max_txt = cl_format_grade_value($grade_data['max_grade']);
-        return $grade_txt . ' / ' . $max_txt;
+    $max_txt   = cl_format_grade_value($grade_data['max_grade']);
+
+    // Intentar obtener curso directamente del attempt
+$course_id = (int) get_post_meta($attempt->ID, '_cl_course_id', true);
+
+// Si no existe, intentar obtenerlo desde la lección
+if (!$course_id) {
+    $lesson_id = (int) get_post_meta($attempt->ID, '_cl_lesson_id', true);
+    if ($lesson_id) {
+        $course_id = (int) get_post_meta($lesson_id, '_cl_course_id', true);
     }
-    return $grade_txt;
+}
+
+// Si sigue sin existir, salir mostrando solo la nota
+if (!$course_id) {
+    return $grade_txt . ' / ' . $max_txt;
+}
+
+$course = get_post($course_id);
+if (!$course) {
+    return $grade_txt . ' / ' . $max_txt;
+}
+
+$course_url = get_permalink($course_id);
+
+return $grade_txt . ' / ' . $max_txt .
+       ' – <a href="' . esc_url($course_url) . '">' .
+       esc_html($course->post_title) .
+       '</a>';
 }
 
 add_shortcode('cl_nota_curso_actual', 'cl_render_nota_curso_actual_shortcode');
