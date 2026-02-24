@@ -524,19 +524,34 @@ function cl_process_courses_exams_relation_actions($user_id) {
             $can_manage &&
             wp_verify_nonce($nonce, 'cl_delete_course_progress_' . $target_user_id . '_' . $course_id)
         ) {
-            delete_user_meta($target_user_id, "cl_curso_{$course_id}_completadas");
-            delete_user_meta($target_user_id, "cl_curso_{$course_id}_actual");
-            delete_user_meta($target_user_id, "cl_curso_{$course_id}_tiempos");
-            delete_user_meta($target_user_id, "cl_curso_{$course_id}_aprobado");
-            delete_user_meta($target_user_id, cl_course_started_meta_key($course_id));
-
-            global $wpdb;
-            $table = cl_get_hist_table_name();
-            $wpdb->query($wpdb->prepare("DELETE FROM {$table} WHERE user_id = %d AND curso_id = %d", $target_user_id, $course_id));
-
+            cl_delete_user_course_progress($target_user_id, $course_id, true);
             $notices[] = ['type' => 'success', 'text' => 'Progreso borrado correctamente.'];
         } else {
             $notices[] = ['type' => 'warning', 'text' => 'No se pudo borrar el progreso (permiso o nonce inválido).'];
+        }
+    }
+
+    if (!empty($_GET['cl_delete_course_enrollment'])) {
+        $course_id = absint($_GET['cl_delete_course_enrollment']);
+        $target_user_id = isset($_GET['cl_enroll_user']) ? absint($_GET['cl_enroll_user']) : $user_id;
+        $nonce = isset($_GET['_cl_enroll_nonce']) ? sanitize_text_field(wp_unslash($_GET['_cl_enroll_nonce'])) : '';
+        $can_manage = current_user_can('manage_options') || $target_user_id === $user_id;
+        if (
+            $course_id > 0 &&
+            $target_user_id > 0 &&
+            $can_manage &&
+            wp_verify_nonce($nonce, 'cl_delete_course_enrollment_' . $target_user_id . '_' . $course_id)
+        ) {
+            $summary = cl_get_course_user_summary($target_user_id, $course_id);
+            if (!cl_is_zero_progress_enrollment_summary($summary)) {
+                $notices[] = ['type' => 'warning', 'text' => 'Solo puedes borrar la inscripción cuando el estado sea “Inscrito” y el progreso sea 0.'];
+            } elseif (cl_remove_user_course_enrollment($target_user_id, $course_id, true)) {
+                $notices[] = ['type' => 'success', 'text' => 'Inscripción eliminada correctamente.'];
+            } else {
+                $notices[] = ['type' => 'warning', 'text' => 'No se pudo eliminar la inscripción.'];
+            }
+        } else {
+            $notices[] = ['type' => 'warning', 'text' => 'No se pudo eliminar la inscripción (permiso o nonce inválido).'];
         }
     }
 
@@ -653,7 +668,22 @@ function cl_get_courses_exams_relation($args = []) {
             'cl_delete_course_progress_' . $user_id . '_' . $course->ID,
             '_cl_progress_nonce'
         );
-        $action_html = '<a class="button button-secondary" href="' . esc_url($delete_progress_url) . '" onclick="return confirm(\'¿Seguro que quieres borrar el progreso del curso?\')">Borrar progreso</a>';
+        $actions = [];
+        $actions[] = '<a class="button button-secondary" href="' . esc_url($delete_progress_url) . '" onclick="return confirm(\'¿Seguro que quieres borrar el progreso del curso?\')">Borrar progreso</a>';
+
+        if (cl_is_zero_progress_enrollment_summary($summary)) {
+            $delete_enrollment_url = wp_nonce_url(
+                add_query_arg([
+                    'cl_delete_course_enrollment' => (int) $course->ID,
+                    'cl_enroll_user' => (int) $user_id,
+                ]),
+                'cl_delete_course_enrollment_' . $user_id . '_' . $course->ID,
+                '_cl_enroll_nonce'
+            );
+            $actions[] = '<a class="button button-secondary" href="' . esc_url($delete_enrollment_url) . '" onclick="return confirm(\'¿Seguro que quieres borrar la inscripción del curso?\')">Borrar inscripción</a>';
+        }
+
+        $action_html = implode(' ', $actions);
 
         $course_rows[] = [
             'course' => $course,
@@ -1009,6 +1039,63 @@ function cl_is_course_pending_for_user($user_id, $curso_id) {
     $curso_id = absint($curso_id);
     if (!$curso_id) return false;
     return in_array($curso_id, cl_get_user_pending_enrollments($user_id), true);
+}
+
+function cl_delete_user_course_progress($user_id, $curso_id, $delete_history = true) {
+    $user_id = absint($user_id);
+    $curso_id = absint($curso_id);
+    if (!$user_id || !$curso_id) return false;
+
+    delete_user_meta($user_id, "cl_curso_{$curso_id}_completadas");
+    delete_user_meta($user_id, "cl_curso_{$curso_id}_actual");
+    delete_user_meta($user_id, "cl_curso_{$curso_id}_tiempos");
+    delete_user_meta($user_id, "cl_curso_{$curso_id}_aprobado");
+    delete_user_meta($user_id, cl_course_started_meta_key($curso_id));
+
+    if (!empty($delete_history)) {
+        global $wpdb;
+        $table = cl_get_hist_table_name();
+        $wpdb->query($wpdb->prepare("DELETE FROM {$table} WHERE user_id = %d AND curso_id = %d", $user_id, $curso_id));
+    }
+
+    return true;
+}
+
+function cl_is_zero_progress_enrollment_summary($summary) {
+    if (empty($summary['valid'])) return false;
+    if (($summary['access_mode'] ?? '') !== 'inscripcion') return false;
+    if (empty($summary['is_enrolled']) || !empty($summary['is_pending'])) return false;
+    if (!empty($summary['started'])) return false;
+    if ((int)($summary['completed_lessons'] ?? 0) !== 0) return false;
+    if (!empty($summary['lesson_times'])) return false;
+    if (!empty($summary['approved'])) return false;
+    return true;
+}
+
+function cl_remove_user_course_enrollment($user_id, $curso_id, $clear_progress = true) {
+    $user_id = absint($user_id);
+    $curso_id = absint($curso_id);
+    if (!$user_id || !$curso_id || get_post_type($curso_id) !== 'curso-cie') return false;
+    if (cl_course_access_mode($curso_id) !== 'inscripcion') return false;
+
+    $changed = false;
+    $ids = cl_get_enrolled_user_ids($curso_id);
+    if (in_array($user_id, $ids, true)) {
+        $ids = array_values(array_diff($ids, [$user_id]));
+        update_post_meta($curso_id, CL_META_ENROLLED_USERS, $ids);
+        $changed = true;
+    }
+
+    if (cl_is_course_pending_for_user($user_id, $curso_id)) {
+        cl_remove_user_pending_enrollments($user_id, [$curso_id]);
+        $changed = true;
+    }
+
+    if (!empty($clear_progress)) {
+        cl_delete_user_course_progress($user_id, $curso_id, true);
+    }
+
+    return $changed;
 }
 
 function cl_get_course_user_summary($user_id, $curso_id) {
@@ -2904,39 +2991,63 @@ function cl_render_progreso_usuarios(){
             isset($_POST['cl_progress_nonce']) &&
             wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['cl_progress_nonce'])), 'cl_delete_progress_' . $uid . '_' . $cid)
         ) {
-            delete_user_meta($uid, "cl_curso_{$cid}_completadas");
-            delete_user_meta($uid, "cl_curso_{$cid}_actual");
-            delete_user_meta($uid, "cl_curso_{$cid}_tiempos");
-            delete_user_meta($uid, "cl_curso_{$cid}_aprobado");
-            delete_user_meta($uid, cl_course_started_meta_key($cid));
-
-            // Borrar histórico
-            global $wpdb;
-            $table = cl_get_hist_table_name();
-            $wpdb->query($wpdb->prepare("DELETE FROM {$table} WHERE user_id = %d AND curso_id = %d", $uid, $cid));
+            cl_delete_user_course_progress($uid, $cid, true);
             $notice_html = '<div class="notice notice-success"><p>Progreso borrado correctamente.</p></div>';
         }
     }
 
+    if (!empty($_POST['cl_borrar_inscripcion_usuario']) && !empty($_POST['cl_borrar_inscripcion_curso'])) {
+        $uid = absint($_POST['cl_borrar_inscripcion_usuario']);
+        $cid = absint($_POST['cl_borrar_inscripcion_curso']);
+        if (
+            $uid > 0 &&
+            $cid > 0 &&
+            isset($_POST['cl_enrollment_nonce']) &&
+            wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['cl_enrollment_nonce'])), 'cl_delete_enrollment_' . $uid . '_' . $cid)
+        ) {
+            $summary = cl_get_course_user_summary($uid, $cid);
+            if (!cl_is_zero_progress_enrollment_summary($summary)) {
+                $notice_html = '<div class="notice notice-warning"><p>Solo se puede borrar la inscripción cuando el estado sea “Inscrito” y el progreso sea 0.</p></div>';
+            } elseif (cl_remove_user_course_enrollment($uid, $cid, true)) {
+                $notice_html = '<div class="notice notice-success"><p>Inscripción eliminada correctamente.</p></div>';
+            } else {
+                $notice_html = '<div class="notice notice-warning"><p>No se pudo eliminar la inscripción.</p></div>';
+            }
+        }
+    }
+
     $cursos = get_posts(['post_type'=>'curso-cie','numberposts'=>-1]);
-    $usuarios = get_users(['role__in'=>['cie_new_user','cie_user']]);
+    $usuarios_base = get_users(['role__in'=>['cie_new_user','cie_user']]);
+    $usuarios_base_map = [];
+    foreach ($usuarios_base as $u) {
+        $usuarios_base_map[$u->ID] = $u;
+    }
 
     echo '<div class="wrap"><h1>Progreso de usuarios</h1>';
     echo $notice_html; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
 
     foreach($cursos as $curso){
         $lecciones = cl_get_lecciones_ordenadas($curso->ID);
+        $usuarios_map = $usuarios_base_map;
+        foreach (cl_get_enrolled_user_ids($curso->ID) as $eid) {
+            if (isset($usuarios_map[$eid])) continue;
+            $u = get_user_by('id', $eid);
+            if ($u) $usuarios_map[$eid] = $u;
+        }
+
         echo '<h2>'.esc_html($curso->post_title).'</h2>';
         echo '<table class="widefat striped"><thead><tr>
                 <th>Usuario</th><th>Estado</th><th>Lecciones completadas</th><th>Tiempo por lección</th><th>Acciones</th>
               </tr></thead><tbody>';
 
-        foreach($usuarios as $user){
+        foreach($usuarios_map as $user){
             $summary = cl_get_course_user_summary($user->ID, $curso->ID);
+            $is_enrolled_inscripcion = (($summary['access_mode'] ?? '') === 'inscripcion') && !empty($summary['is_enrolled']);
             $has_activity = !empty($summary['started'])
                 || (int)($summary['completed_lessons'] ?? 0) > 0
                 || !empty($summary['approved'])
-                || !empty($summary['lesson_times']);
+                || !empty($summary['lesson_times'])
+                || $is_enrolled_inscripcion;
             if (!$has_activity) continue;
 
             $completadas = array_map('absint', (array)($summary['completed_lesson_ids'] ?? []));
@@ -2955,14 +3066,24 @@ function cl_render_progreso_usuarios(){
             echo '<td>'.$estado_curso_html.'</td>';
             echo '<td>'.esc_html((int)($summary['completed_lessons'] ?? 0).'/'.(int)($summary['total_lessons'] ?? 0)).'</td>';
             echo '<td>'.implode('<br>',$lecciones_text).'</td>';
-            echo '<td>
-                    <form method="post" style="display:inline">
-                        <input type="hidden" name="cl_borrar_usuario" value="'.esc_attr($user->ID).'">
-                        <input type="hidden" name="cl_borrar_curso" value="'.esc_attr($curso->ID).'">
-                        '.wp_nonce_field('cl_delete_progress_' . absint($user->ID) . '_' . absint($curso->ID), 'cl_progress_nonce', true, false).'
-                        <button type="submit" class="button button-secondary" onclick="return confirm(\'¿Seguro que quieres borrar el progreso?\')">Borrar progreso</button>
-                    </form>
-                  </td>';
+            $acciones = [];
+            $acciones[] = '<form method="post" style="display:inline">
+                    <input type="hidden" name="cl_borrar_usuario" value="'.esc_attr($user->ID).'">
+                    <input type="hidden" name="cl_borrar_curso" value="'.esc_attr($curso->ID).'">
+                    '.wp_nonce_field('cl_delete_progress_' . absint($user->ID) . '_' . absint($curso->ID), 'cl_progress_nonce', true, false).'
+                    <button type="submit" class="button button-secondary" onclick="return confirm(\'¿Seguro que quieres borrar el progreso?\')">Borrar progreso</button>
+                </form>';
+
+            if (cl_is_zero_progress_enrollment_summary($summary)) {
+                $acciones[] = '<form method="post" style="display:inline; margin-left:6px;">
+                        <input type="hidden" name="cl_borrar_inscripcion_usuario" value="'.esc_attr($user->ID).'">
+                        <input type="hidden" name="cl_borrar_inscripcion_curso" value="'.esc_attr($curso->ID).'">
+                        '.wp_nonce_field('cl_delete_enrollment_' . absint($user->ID) . '_' . absint($curso->ID), 'cl_enrollment_nonce', true, false).'
+                        <button type="submit" class="button button-secondary" onclick="return confirm(\'¿Seguro que quieres borrar la inscripción completa de este curso?\')">Borrar inscripción</button>
+                    </form>';
+            }
+
+            echo '<td>' . implode(' ', $acciones) . '</td>';
             echo '</tr>';
         }
 
