@@ -27,6 +27,7 @@ define('CL_META_EXAM_EMAIL_REVOKED_BODY', '_cl_exam_email_revoked_body'); // str
 // User meta: cursos solicitados (pendiente de aprobación de inscripción)
 define('CL_USER_META_PENDING_ENROLLMENTS', '_cl_pending_enrollments'); // array course IDs
 define('CL_USER_META_PENDING_ENROLLMENTS_DATES', '_cl_pending_enrollments_dates'); // map course ID => timestamp
+define('CL_OPTION_ENROLLMENT_REQUESTS', 'cl_enrollment_requests'); // token => request payload
 
 // Lecciones (reemplazo de ACF "Contenido de lección")
 define('CL_META_LESSON_TYPE', '_cl_tipo_de_leccion'); // normal | video | examen
@@ -512,6 +513,33 @@ function cl_process_courses_exams_relation_actions($user_id) {
     $user_id = absint($user_id);
     if (!$user_id) return $notices;
 
+    if (!empty($_GET['cl_delete_course_progress'])) {
+        $course_id = absint($_GET['cl_delete_course_progress']);
+        $target_user_id = isset($_GET['cl_progress_user']) ? absint($_GET['cl_progress_user']) : $user_id;
+        $nonce = isset($_GET['_cl_progress_nonce']) ? sanitize_text_field(wp_unslash($_GET['_cl_progress_nonce'])) : '';
+        $can_manage = current_user_can('manage_options') || $target_user_id === $user_id;
+        if (
+            $course_id > 0 &&
+            $target_user_id > 0 &&
+            $can_manage &&
+            wp_verify_nonce($nonce, 'cl_delete_course_progress_' . $target_user_id . '_' . $course_id)
+        ) {
+            delete_user_meta($target_user_id, "cl_curso_{$course_id}_completadas");
+            delete_user_meta($target_user_id, "cl_curso_{$course_id}_actual");
+            delete_user_meta($target_user_id, "cl_curso_{$course_id}_tiempos");
+            delete_user_meta($target_user_id, "cl_curso_{$course_id}_aprobado");
+            delete_user_meta($target_user_id, cl_course_started_meta_key($course_id));
+
+            global $wpdb;
+            $table = cl_get_hist_table_name();
+            $wpdb->query($wpdb->prepare("DELETE FROM {$table} WHERE user_id = %d AND curso_id = %d", $target_user_id, $course_id));
+
+            $notices[] = ['type' => 'success', 'text' => 'Progreso borrado correctamente.'];
+        } else {
+            $notices[] = ['type' => 'warning', 'text' => 'No se pudo borrar el progreso (permiso o nonce inválido).'];
+        }
+    }
+
     if (!empty($_GET['cl_delete_exam_attempt'])) {
         $attempt_id = absint($_GET['cl_delete_exam_attempt']);
         $nonce = isset($_GET['_cl_del_nonce']) ? sanitize_text_field(wp_unslash($_GET['_cl_del_nonce'])) : '';
@@ -527,16 +555,38 @@ function cl_process_courses_exams_relation_actions($user_id) {
         }
     }
 
-    if (!empty($_GET['cl_cancel_pending_course'])) {
-        $course_id = absint($_GET['cl_cancel_pending_course']);
+    if (!empty($_GET['cl_pending_decision']) && !empty($_GET['cl_pending_course']) && !empty($_GET['cl_pending_user'])) {
+        $decision = sanitize_key((string) $_GET['cl_pending_decision']);
+        $course_id = absint($_GET['cl_pending_course']);
+        $target_user_id = absint($_GET['cl_pending_user']);
         $nonce = isset($_GET['_cl_pending_nonce']) ? sanitize_text_field(wp_unslash($_GET['_cl_pending_nonce'])) : '';
-        if ($course_id > 0 && wp_verify_nonce($nonce, 'cl_cancel_pending_course_' . $course_id)) {
-            if (cl_is_course_pending_for_user($user_id, $course_id)) {
-                cl_remove_user_pending_enrollments($user_id, [$course_id]);
-                $notices[] = ['type' => 'success', 'text' => 'Solicitud de inscripción cancelada.'];
+
+        if (!current_user_can('manage_options')) {
+            $notices[] = ['type' => 'warning', 'text' => 'No tienes permisos para revisar inscripciones.'];
+        } elseif (
+            !in_array($decision, ['approve', 'revoke'], true) ||
+            $course_id <= 0 ||
+            $target_user_id <= 0 ||
+            !wp_verify_nonce($nonce, 'cl_pending_decision_' . $target_user_id . '_' . $course_id . '_' . $decision)
+        ) {
+            $notices[] = ['type' => 'warning', 'text' => 'Acción de inscripción inválida.'];
+        } elseif (!cl_is_course_pending_for_user($target_user_id, $course_id)) {
+            $notices[] = ['type' => 'warning', 'text' => 'La solicitud ya no está pendiente.'];
+        } else {
+            $result = cl_apply_enrollment_decisions($target_user_id, [$course_id], [$course_id => $decision], get_current_user_id());
+            if ($decision === 'approve') {
+                $notices[] = ['type' => 'success', 'text' => 'Inscripción aprobada.'];
             } else {
-                $notices[] = ['type' => 'warning', 'text' => 'La solicitud ya no estaba pendiente.'];
+                $notices[] = ['type' => 'success', 'text' => 'Inscripción revocada.'];
             }
+            cl_create_enrollment_request_token($target_user_id, [$course_id], [
+                'status' => 'processed',
+                'approved' => $result['approved'],
+                'revoked' => $result['revoked'],
+                'reviewed_by' => get_current_user_id(),
+                'reviewed_at' => time(),
+                'source' => 'courses_exams_relation',
+            ]);
         }
     }
 
@@ -595,13 +645,15 @@ function cl_get_courses_exams_relation($args = []) {
             $lesson_lines[] = $state . ' (' . esc_html($time_txt) . ') ' . esc_html($lesson->post_title);
         }
 
-        $action_html = cl_get_course_action_html_from_summary($summary, $course->ID, [
-            'show_enroll_button' => false,
-            'show_pending_label' => true,
-            'show_start_button' => true,
-            'show_continue_link' => true,
-            'start_button_id' => '',
-        ]);
+        $delete_progress_url = wp_nonce_url(
+            add_query_arg([
+                'cl_delete_course_progress' => (int) $course->ID,
+                'cl_progress_user' => (int) $user_id,
+            ]),
+            'cl_delete_course_progress_' . $user_id . '_' . $course->ID,
+            '_cl_progress_nonce'
+        );
+        $action_html = '<a class="button button-secondary" href="' . esc_url($delete_progress_url) . '" onclick="return confirm(\'¿Seguro que quieres borrar el progreso del curso?\')">Borrar progreso</a>';
 
         $course_rows[] = [
             'course' => $course,
@@ -686,15 +738,34 @@ function cl_get_courses_exams_relation($args = []) {
         if (!$course || $course->post_type !== 'curso-cie') continue;
         $ts = isset($pending_dates[$cid]) ? absint($pending_dates[$cid]) : 0;
         $date_txt = $ts > 0 ? date_i18n('Y-m-d H:i', $ts) : '-';
-        $cancel_url = wp_nonce_url(
-            add_query_arg(['cl_cancel_pending_course' => $cid]),
-            'cl_cancel_pending_course_' . $cid,
-            '_cl_pending_nonce'
-        );
+        $actions_html = '-';
+        if (current_user_can('manage_options')) {
+            $approve_url = wp_nonce_url(
+                add_query_arg([
+                    'cl_pending_decision' => 'approve',
+                    'cl_pending_course' => (int) $cid,
+                    'cl_pending_user' => (int) $user_id,
+                ]),
+                'cl_pending_decision_' . $user_id . '_' . $cid . '_approve',
+                '_cl_pending_nonce'
+            );
+            $revoke_url = wp_nonce_url(
+                add_query_arg([
+                    'cl_pending_decision' => 'revoke',
+                    'cl_pending_course' => (int) $cid,
+                    'cl_pending_user' => (int) $user_id,
+                ]),
+                'cl_pending_decision_' . $user_id . '_' . $cid . '_revoke',
+                '_cl_pending_nonce'
+            );
+            $actions_html =
+                '<a class="button button-primary" href="' . esc_url($approve_url) . '" onclick="return confirm(\'¿Aprobar esta inscripción?\')">Aprobar</a> ' .
+                '<a class="button button-secondary" href="' . esc_url($revoke_url) . '" onclick="return confirm(\'¿Revocar esta inscripción?\')">Revocar</a>';
+        }
         $pending_rows[] = [
             'course' => $course,
             'date' => $date_txt,
-            'actions' => '<a class="button button-secondary" href="' . esc_url($cancel_url) . '" onclick="return confirm(\'¿Cancelar solicitud de inscripción?\')">Cancelar</a>',
+            'actions' => $actions_html,
         ];
     }
 
@@ -3722,16 +3793,245 @@ function cl_get_enrollment_review_admin_url($token) {
     return add_query_arg('token', rawurlencode($token), $url);
 }
 
+function cl_normalize_enrollment_request_payload($req) {
+    $req = is_array($req) ? $req : [];
+    $user_id = absint($req['user_id'] ?? 0);
+    $course_ids = array_values(array_unique(array_filter(array_map('absint', (array)($req['course_ids'] ?? [])))));
+    $status = sanitize_key((string)($req['status'] ?? 'pending'));
+    if (!in_array($status, ['pending', 'processed'], true)) $status = 'pending';
+
+    return [
+        'user_id' => $user_id,
+        'course_ids' => $course_ids,
+        'created_at' => absint($req['created_at'] ?? time()),
+        'status' => $status,
+        'approved' => array_values(array_unique(array_filter(array_map('absint', (array)($req['approved'] ?? []))))),
+        'revoked' => array_values(array_unique(array_filter(array_map('absint', (array)($req['revoked'] ?? []))))),
+        'reviewed_at' => absint($req['reviewed_at'] ?? 0),
+        'reviewed_by' => absint($req['reviewed_by'] ?? 0),
+        'source' => sanitize_key((string)($req['source'] ?? 'form_request')),
+    ];
+}
+
+function cl_get_enrollment_requests_store() {
+    $store = get_option(CL_OPTION_ENROLLMENT_REQUESTS, []);
+    if (!is_array($store)) $store = [];
+    $out = [];
+    foreach ($store as $token => $req) {
+        $token = sanitize_text_field((string)$token);
+        if ($token === '') continue;
+        $norm = cl_normalize_enrollment_request_payload($req);
+        if ($norm['user_id'] <= 0 || empty($norm['course_ids'])) continue;
+        $out[$token] = $norm;
+    }
+    return $out;
+}
+
+function cl_save_enrollment_requests_store($store) {
+    $clean = [];
+    if (is_array($store)) {
+        foreach ($store as $token => $req) {
+            $token = sanitize_text_field((string)$token);
+            if ($token === '') continue;
+            $norm = cl_normalize_enrollment_request_payload($req);
+            if ($norm['user_id'] <= 0 || empty($norm['course_ids'])) continue;
+            $clean[$token] = $norm;
+        }
+    }
+
+    if (count($clean) > 300) {
+        uasort($clean, function($a, $b) {
+            $ta = max((int)($a['reviewed_at'] ?? 0), (int)($a['created_at'] ?? 0));
+            $tb = max((int)($b['reviewed_at'] ?? 0), (int)($b['created_at'] ?? 0));
+            return $tb <=> $ta;
+        });
+        $clean = array_slice($clean, 0, 300, true);
+    }
+
+    update_option(CL_OPTION_ENROLLMENT_REQUESTS, $clean, false);
+}
+
+function cl_get_enrollment_request_by_token($token) {
+    $token = sanitize_text_field((string)$token);
+    if ($token === '') return null;
+
+    $store = cl_get_enrollment_requests_store();
+    if (isset($store[$token])) return $store[$token];
+
+    // Compatibilidad con tokens antiguos guardados en transient.
+    $legacy = get_transient('cl_enroll_req_' . $token);
+    if (is_array($legacy) && !empty($legacy['user_id']) && !empty($legacy['course_ids'])) {
+        $req = cl_normalize_enrollment_request_payload($legacy);
+        $store[$token] = $req;
+        cl_save_enrollment_requests_store($store);
+        return $req;
+    }
+
+    return null;
+}
+
+function cl_set_enrollment_request($token, $req) {
+    $token = sanitize_text_field((string)$token);
+    if ($token === '') return;
+    $store = cl_get_enrollment_requests_store();
+    $store[$token] = cl_normalize_enrollment_request_payload($req);
+    cl_save_enrollment_requests_store($store);
+}
+
+function cl_mark_enrollment_request_processed($token, $approved, $revoked, $reviewed_by = 0) {
+    $token = sanitize_text_field((string)$token);
+    if ($token === '') return;
+    $req = cl_get_enrollment_request_by_token($token);
+    if (!is_array($req)) return;
+    $req['status'] = 'processed';
+    $req['approved'] = array_values(array_unique(array_filter(array_map('absint', (array)$approved))));
+    $req['revoked'] = array_values(array_unique(array_filter(array_map('absint', (array)$revoked))));
+    $req['reviewed_at'] = time();
+    $req['reviewed_by'] = absint($reviewed_by);
+    cl_set_enrollment_request($token, $req);
+}
+
+function cl_send_enrollment_result_email($user_id, $approved, $revoked) {
+    $user_id = absint($user_id);
+    $approved = array_values(array_unique(array_filter(array_map('absint', (array)$approved))));
+    $revoked = array_values(array_unique(array_filter(array_map('absint', (array)$revoked))));
+    if ($user_id <= 0) return;
+
+    $user = get_user_by('id', $user_id);
+    if (!$user || empty($user->user_email)) return;
+
+    $subject = 'Resultado de tu solicitud de inscripción';
+    $msg = "Hemos revisado tu solicitud de inscripción.\n\n";
+
+    if (!empty($approved)) {
+        $msg .= "Cursos aprobados:\n";
+        foreach ($approved as $cid) {
+            $c = get_post($cid);
+            $msg .= "- " . ($c ? $c->post_title : ('Curso ' . $cid)) . "\n";
+            $msg .= "  " . get_permalink($cid) . "\n";
+        }
+        $msg .= "\n";
+    }
+
+    if (!empty($revoked)) {
+        $msg .= "Cursos no aprobados:\n";
+        foreach ($revoked as $cid) {
+            $c = get_post($cid);
+            $msg .= "- " . ($c ? $c->post_title : ('Curso ' . $cid)) . "\n";
+            $msg .= "  " . get_permalink($cid) . "\n";
+        }
+        $msg .= "\n";
+    }
+
+    wp_mail($user->user_email, $subject, $msg);
+}
+
+function cl_apply_enrollment_decisions($user_id, $course_ids, $decisions = [], $reviewed_by = 0) {
+    $user_id = absint($user_id);
+    $reviewed_by = absint($reviewed_by);
+    $course_ids = array_values(array_unique(array_filter(array_map('absint', (array)$course_ids))));
+
+    $approved = [];
+    $revoked = [];
+
+    foreach ($course_ids as $cid) {
+        if (get_post_type($cid) !== 'curso-cie') continue;
+        if (cl_course_access_mode($cid) !== 'inscripcion') continue;
+
+        $decision = isset($decisions[$cid]) ? sanitize_text_field((string)$decisions[$cid]) : 'approve';
+        if ($decision !== 'approve') {
+            $revoked[] = $cid;
+            continue;
+        }
+
+        $ids = cl_get_enrolled_user_ids($cid);
+        if (!in_array($user_id, $ids, true)) {
+            $ids[] = $user_id;
+            update_post_meta($cid, CL_META_ENROLLED_USERS, array_values(array_unique($ids)));
+        }
+        $approved[] = $cid;
+    }
+
+    cl_remove_user_pending_enrollments($user_id, array_merge($approved, $revoked));
+    if (!empty($approved) || !empty($revoked)) {
+        cl_send_enrollment_result_email($user_id, $approved, $revoked);
+    }
+
+    return [
+        'approved' => $approved,
+        'revoked' => $revoked,
+        'reviewed_by' => $reviewed_by,
+    ];
+}
+
+function cl_get_pending_enrollment_request_token_for_user($user_id) {
+    $user_id = absint($user_id);
+    if ($user_id <= 0) return '';
+    $pending = cl_get_user_pending_enrollments($user_id);
+    if (empty($pending)) return '';
+    sort($pending);
+
+    $store = cl_get_enrollment_requests_store();
+    foreach ($store as $token => $req) {
+        if ((int)($req['user_id'] ?? 0) !== $user_id) continue;
+        if (($req['status'] ?? 'pending') !== 'pending') continue;
+        $req_courses = array_values(array_unique(array_filter(array_map('absint', (array)($req['course_ids'] ?? [])))));
+        sort($req_courses);
+        if ($req_courses === $pending) return (string) $token;
+    }
+
+    $dates = cl_get_user_pending_enrollments_dates($user_id);
+    $created_at = time();
+    if (!empty($dates)) {
+        $created_at = min(array_map('absint', array_values($dates)));
+        if ($created_at <= 0) $created_at = time();
+    }
+    return cl_create_enrollment_request_token($user_id, $pending, [
+        'created_at' => $created_at,
+        'source' => 'pending_index',
+    ]);
+}
+
 /* =====================================================
    SHORTCODE: FORMULARIO SOLICITUD INSCRIPCIÓN
 ===================================================== */
-function cl_create_enrollment_request_token($user_id, $course_ids) {
-    $token = wp_generate_uuid4();
-    set_transient('cl_enroll_req_' . $token, [
-        'user_id' => (int) $user_id,
-        'course_ids' => array_values(array_unique(array_filter(array_map('absint', (array)$course_ids)))),
+function cl_create_enrollment_request_token($user_id, $course_ids, $args = []) {
+    $user_id = absint($user_id);
+    $course_ids = array_values(array_unique(array_filter(array_map('absint', (array)$course_ids))));
+    if ($user_id <= 0 || empty($course_ids)) return '';
+
+    $args = wp_parse_args((array)$args, [
+        'token' => '',
         'created_at' => time(),
+        'status' => 'pending',
+        'approved' => [],
+        'revoked' => [],
+        'reviewed_at' => 0,
+        'reviewed_by' => 0,
+        'source' => 'form_request',
+    ]);
+
+    $token = sanitize_text_field((string)$args['token']);
+    if ($token === '') $token = wp_generate_uuid4();
+    cl_set_enrollment_request($token, [
+        'user_id' => $user_id,
+        'course_ids' => $course_ids,
+        'created_at' => absint($args['created_at']),
+        'status' => sanitize_key((string)$args['status']),
+        'approved' => (array)$args['approved'],
+        'revoked' => (array)$args['revoked'],
+        'reviewed_at' => absint($args['reviewed_at']),
+        'reviewed_by' => absint($args['reviewed_by']),
+        'source' => sanitize_key((string)$args['source']),
+    ]);
+
+    // Compatibilidad con enlaces antiguos.
+    set_transient('cl_enroll_req_' . $token, [
+        'user_id' => $user_id,
+        'course_ids' => $course_ids,
+        'created_at' => absint($args['created_at']),
     ], 7 * DAY_IN_SECONDS);
+
     return $token;
 }
 
@@ -3840,10 +4140,140 @@ add_shortcode('cl_form_inscripcion', function($atts) {
     return ob_get_clean();
 });
 
+function cl_get_enrollment_request_status_label($status) {
+    $status = sanitize_key((string)$status);
+    if ($status === 'processed') return 'Procesada';
+    return 'Pendiente';
+}
+
+function cl_render_enrollment_review_index_admin_page($notice_html = '') {
+    $users = get_users(['fields' => ['ID']]);
+    foreach ($users as $u) {
+        cl_get_pending_enrollment_request_token_for_user((int)$u->ID);
+    }
+
+    $store = cl_get_enrollment_requests_store();
+    $pending_rows = [];
+    $history_rows = [];
+
+    foreach ($store as $token => $req) {
+        $user_id = (int)($req['user_id'] ?? 0);
+        if ($user_id <= 0) continue;
+        $user = get_user_by('id', $user_id);
+        $course_ids = array_values(array_unique(array_filter(array_map('absint', (array)($req['course_ids'] ?? [])))));
+        if (empty($course_ids)) continue;
+
+        if (($req['status'] ?? 'pending') === 'pending') {
+            $current_pending = cl_get_user_pending_enrollments($user_id);
+            $course_ids = array_values(array_intersect($course_ids, $current_pending));
+            if (empty($course_ids)) continue;
+        }
+
+        $course_titles = [];
+        foreach ($course_ids as $cid) {
+            $c = get_post($cid);
+            if ($c && $c->post_type === 'curso-cie') $course_titles[] = (string)$c->post_title;
+        }
+        if (empty($course_titles)) continue;
+
+        $row = [
+            'token' => $token,
+            'user' => $user,
+            'user_id' => $user_id,
+            'courses_html' => implode('<br>', array_map('esc_html', $course_titles)),
+            'created_at' => (int)($req['created_at'] ?? 0),
+            'reviewed_at' => (int)($req['reviewed_at'] ?? 0),
+            'reviewed_by' => (int)($req['reviewed_by'] ?? 0),
+            'approved' => array_values(array_unique(array_filter(array_map('absint', (array)($req['approved'] ?? []))))),
+            'revoked' => array_values(array_unique(array_filter(array_map('absint', (array)($req['revoked'] ?? []))))),
+            'status' => (string)($req['status'] ?? 'pending'),
+        ];
+
+        if ($row['status'] === 'pending') $pending_rows[] = $row;
+        else $history_rows[] = $row;
+    }
+
+    usort($pending_rows, function($a, $b) {
+        return (int)$b['created_at'] <=> (int)$a['created_at'];
+    });
+    usort($history_rows, function($a, $b) {
+        $ta = max((int)$a['reviewed_at'], (int)$a['created_at']);
+        $tb = max((int)$b['reviewed_at'], (int)$b['created_at']);
+        return $tb <=> $ta;
+    });
+
+    echo '<div class="wrap"><h1>Revisar solicitud de inscripción</h1>';
+    if ($notice_html !== '') {
+        echo $notice_html; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+    }
+    if (!empty($_GET['processed'])) {
+        echo '<div class="notice notice-success"><p>Solicitud revisada correctamente.</p></div>';
+    }
+
+    echo '<h2>Solicitudes pendientes</h2>';
+    echo '<table class="widefat striped"><thead><tr>';
+    echo '<th>Usuario</th><th>Email</th><th>Cursos</th><th>Fecha</th><th>Acciones</th>';
+    echo '</tr></thead><tbody>';
+    if (empty($pending_rows)) {
+        echo '<tr><td colspan="5">No hay solicitudes pendientes.</td></tr>';
+    } else {
+        foreach ($pending_rows as $row) {
+            $user = $row['user'];
+            $review_url = cl_get_enrollment_review_admin_url($row['token']);
+            echo '<tr>';
+            echo '<td>' . esc_html($user ? ($user->display_name . ' (' . $user->user_login . ')') : ('Usuario ' . $row['user_id'])) . '</td>';
+            echo '<td>' . esc_html($user ? $user->user_email : '-') . '</td>';
+            echo '<td>' . $row['courses_html'] . '</td>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+            echo '<td>' . esc_html(!empty($row['created_at']) ? date_i18n('Y-m-d H:i', (int)$row['created_at']) : '-') . '</td>';
+            echo '<td><a class="button button-primary" href="' . esc_url($review_url) . '">Revisar</a></td>';
+            echo '</tr>';
+        }
+    }
+    echo '</tbody></table>';
+
+    echo '<h2 style="margin-top:24px;">Historial</h2>';
+    echo '<table class="widefat striped"><thead><tr>';
+    echo '<th>Fecha</th><th>Usuario</th><th>Cursos</th><th>Resultado</th><th>Revisor</th><th>Acciones</th>';
+    echo '</tr></thead><tbody>';
+    if (empty($history_rows)) {
+        echo '<tr><td colspan="6">Sin solicitudes procesadas todavía.</td></tr>';
+    } else {
+        foreach ($history_rows as $row) {
+            $user = $row['user'];
+            $reviewer = $row['reviewed_by'] > 0 ? get_user_by('id', $row['reviewed_by']) : null;
+            $review_url = cl_get_enrollment_review_admin_url($row['token']);
+
+            $result_parts = [];
+            if (!empty($row['approved'])) $result_parts[] = 'Aprobados: ' . count($row['approved']);
+            if (!empty($row['revoked'])) $result_parts[] = 'Revocados: ' . count($row['revoked']);
+            if (empty($result_parts)) $result_parts[] = cl_get_enrollment_request_status_label($row['status']);
+
+            $when = max((int)$row['reviewed_at'], (int)$row['created_at']);
+            echo '<tr>';
+            echo '<td>' . esc_html($when > 0 ? date_i18n('Y-m-d H:i', $when) : '-') . '</td>';
+            echo '<td>' . esc_html($user ? ($user->display_name . ' (' . $user->user_login . ')') : ('Usuario ' . $row['user_id'])) . '</td>';
+            echo '<td>' . $row['courses_html'] . '</td>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+            echo '<td>' . esc_html(implode(' | ', $result_parts)) . '</td>';
+            echo '<td>' . esc_html($reviewer ? $reviewer->display_name : '-') . '</td>';
+            echo '<td><a class="button" href="' . esc_url($review_url) . '">Ver detalle</a></td>';
+            echo '</tr>';
+        }
+    }
+    echo '</tbody></table>';
+    echo '</div>';
+}
+
 function cl_render_enrollment_review_screen($token, $req) {
+    $token = sanitize_text_field((string)$token);
+    $req = cl_normalize_enrollment_request_payload($req);
     $user_id = (int) ($req['user_id'] ?? 0);
+    $status = (string) ($req['status'] ?? 'pending');
     $course_ids = array_values(array_unique(array_filter(array_map('absint', (array)($req['course_ids'] ?? [])))));
     $user = $user_id ? get_user_by('id', $user_id) : null;
+
+    if ($status === 'pending') {
+        $course_ids = array_values(array_intersect($course_ids, cl_get_user_pending_enrollments($user_id)));
+    }
 
     $courses = [];
     foreach ($course_ids as $cid) {
@@ -3854,12 +4284,36 @@ function cl_render_enrollment_review_screen($token, $req) {
 
     echo '<div class="wrap">';
     echo '<h1>Revisar solicitud de inscripción</h1>';
+    if (!empty($_GET['processed'])) {
+        echo '<div class="notice notice-success"><p>Solicitud revisada correctamente.</p></div>';
+    }
+    echo '<p><a href="' . esc_url(cl_get_enrollment_review_admin_url('')) . '">← Volver a solicitudes</a></p>';
+    echo '<p><strong>Estado:</strong> ' . esc_html(cl_get_enrollment_request_status_label($status)) . '</p>';
     echo '<p><strong>Usuario:</strong> ' . esc_html($user ? ($user->display_name . ' (' . $user->user_login . ')') : ('Usuario ' . $user_id)) . '</p>';
     echo '<p><strong>Email:</strong> ' . esc_html($user ? $user->user_email : '-') . '</p>';
+    if (!empty($req['created_at'])) {
+        echo '<p><strong>Solicitado:</strong> ' . esc_html(date_i18n('Y-m-d H:i', (int)$req['created_at'])) . '</p>';
+    }
+    if (!empty($req['reviewed_at'])) {
+        $reviewer = !empty($req['reviewed_by']) ? get_user_by('id', (int)$req['reviewed_by']) : null;
+        echo '<p><strong>Revisado:</strong> ' . esc_html(date_i18n('Y-m-d H:i', (int)$req['reviewed_at'])) . ' por ' . esc_html($reviewer ? $reviewer->display_name : '-') . '</p>';
+    }
     echo '<hr />';
 
     if (empty($courses)) {
-        echo '<p>No hay cursos válidos en esta solicitud.</p>';
+        echo '<p>No hay cursos pendientes para esta solicitud.</p>';
+        if (!empty($req['approved']) || !empty($req['revoked'])) {
+            echo '<p><strong>Resumen:</strong></p><ul>';
+            if (!empty($req['approved'])) echo '<li>Aprobados: ' . esc_html(count((array)$req['approved'])) . '</li>';
+            if (!empty($req['revoked'])) echo '<li>Revocados: ' . esc_html(count((array)$req['revoked'])) . '</li>';
+            echo '</ul>';
+        }
+        echo '</div>';
+        return;
+    }
+
+    if ($status !== 'pending') {
+        echo '<p>Esta solicitud ya fue procesada. Puedes revisarla desde el historial.</p>';
         echo '</div>';
         return;
     }
@@ -3895,13 +4349,13 @@ function cl_render_enrollment_review_admin_page() {
 
     $token = isset($_GET['token']) ? sanitize_text_field(wp_unslash($_GET['token'])) : '';
     if ($token === '') {
-        echo '<div class="wrap"><h1>Revisar solicitud de inscripción</h1><p>Token inválido.</p></div>';
+        cl_render_enrollment_review_index_admin_page();
         return;
     }
 
-    $req = get_transient('cl_enroll_req_' . $token);
+    $req = cl_get_enrollment_request_by_token($token);
     if (!is_array($req) || empty($req['user_id']) || empty($req['course_ids'])) {
-        echo '<div class="wrap"><h1>Revisar solicitud de inscripción</h1><p>Solicitud caducada o inválida.</p></div>';
+        cl_render_enrollment_review_index_admin_page('<div class="notice notice-warning"><p>Solicitud caducada o inválida.</p></div>');
         return;
     }
 
@@ -3921,69 +4375,20 @@ add_action('admin_post_cl_process_enrollment_request', function() {
     if ($token === '') wp_die('Token inválido.');
     check_admin_referer('cl_process_enrollment_request_' . $token);
 
-    $req = get_transient('cl_enroll_req_' . $token);
+    $req = cl_get_enrollment_request_by_token($token);
     if (!is_array($req) || empty($req['user_id']) || empty($req['course_ids'])) {
         wp_die('Solicitud caducada o inválida.');
     }
+
+    $user_id = (int) ($req['user_id'] ?? 0);
+    $course_ids = array_values(array_unique(array_filter(array_map('absint', (array)($req['course_ids'] ?? [])))));
+    $course_ids = array_values(array_intersect($course_ids, cl_get_user_pending_enrollments($user_id)));
+    $decisions = isset($_POST['decision']) ? (array) $_POST['decision'] : [];
+    $result = cl_apply_enrollment_decisions($user_id, $course_ids, $decisions, get_current_user_id());
+
+    cl_mark_enrollment_request_processed($token, $result['approved'], $result['revoked'], get_current_user_id());
     delete_transient('cl_enroll_req_' . $token);
 
-    $user_id = (int) $req['user_id'];
-    $course_ids = array_values(array_unique(array_filter(array_map('absint', (array)$req['course_ids']))));
-    $decisions = isset($_POST['decision']) ? (array) $_POST['decision'] : [];
-
-    $approved = [];
-    $revoked = [];
-
-    foreach ($course_ids as $cid) {
-        if (get_post_type($cid) !== 'curso-cie') continue;
-        if (cl_course_access_mode($cid) !== 'inscripcion') continue;
-
-        $decision = isset($decisions[$cid]) ? sanitize_text_field($decisions[$cid]) : 'approve';
-        if ($decision !== 'approve') {
-            $revoked[] = $cid;
-            continue;
-        }
-
-        $ids = cl_get_enrolled_user_ids($cid);
-        if (!in_array($user_id, $ids, true)) {
-            $ids[] = $user_id;
-            update_post_meta($cid, CL_META_ENROLLED_USERS, array_values(array_unique($ids)));
-        }
-        $approved[] = $cid;
-    }
-
-    // Limpiar pendientes del usuario (aprobados y revocados)
-    cl_remove_user_pending_enrollments($user_id, array_merge($approved, $revoked));
-
-    // Email al usuario con cursos aprobados/revocados + links
-    $user = get_user_by('id', $user_id);
-    if ($user && !empty($user->user_email)) {
-        $subject = 'Resultado de tu solicitud de inscripción';
-        $msg = "Hemos revisado tu solicitud de inscripción.\n\n";
-
-        if (!empty($approved)) {
-            $msg .= "Cursos aprobados:\n";
-            foreach ($approved as $cid) {
-                $c = get_post($cid);
-                $msg .= "- " . ($c ? $c->post_title : ('Curso ' . $cid)) . "\n";
-                $msg .= "  " . get_permalink($cid) . "\n";
-            }
-            $msg .= "\n";
-        }
-
-        if (!empty($revoked)) {
-            $msg .= "Cursos no aprobados:\n";
-            foreach ($revoked as $cid) {
-                $c = get_post($cid);
-                $msg .= "- " . ($c ? $c->post_title : ('Curso ' . $cid)) . "\n";
-                $msg .= "  " . get_permalink($cid) . "\n";
-            }
-            $msg .= "\n";
-        }
-
-        wp_mail($user->user_email, $subject, $msg);
-    }
-
-    wp_safe_redirect(admin_url('edit.php?post_type=curso-cie'));
+    wp_safe_redirect(add_query_arg('processed', '1', cl_get_enrollment_review_admin_url($token)));
     exit;
 });
