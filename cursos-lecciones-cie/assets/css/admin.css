@@ -19,7 +19,7 @@
     display: none !important;
 }
 
-table.widefat td { text-align:center; }
+table.widefat td { text-align:left; }
 button.button-secondary { background:#f44336; color:white; border:none; }
 button.button-secondary:hover { background:#d32f2f; }
 
