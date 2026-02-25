@@ -3157,11 +3157,17 @@ function cl_render_examenes_admin() {
     if (!in_array($status, $allowed, true)) $status = 'pending_review';
 
     echo '<p>';
+    $total = count($allowed);
+    $index = 0;
     foreach ($allowed as $st) {
+        $index++;
         $url = admin_url('admin.php?page=cl_examenes&status=' . urlencode($st));
         $label = cl_get_exam_attempt_status_label($st);
         $active = $st === $status ? ' style="font-weight:bold;"' : '';
-        echo '<a href="' . esc_url($url) . '"' . $active . '>' . esc_html($label) . '</a> ';
+        echo '<a href="' . esc_url($url) . '"' . $active . '>' . esc_html($label) . '</a>';
+        if ($index < $total) {
+         echo "&ensp;|&ensp;";
+        }
     }
     echo '</p>';
 
